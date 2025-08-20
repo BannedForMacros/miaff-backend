@@ -8,7 +8,9 @@ import { config } from './config';
 
 import authRoutes from './routes/auth.routes';
 import healthRoutes from './routes/health.routes';
-import simulationRoutes from './routes/simulation.routes'; // 👈 NUEVO
+import simulationRoutes from './routes/simulation.routes';
+import catalogRoutes from './routes/catalog.routes';
+ // 👈 }
 
 const app = express();
 
@@ -30,7 +32,8 @@ app.use(morgan('dev'));
 // Rutas de la API
 app.use('/api/health', healthRoutes);
 app.use('/api/auth', authRoutes);
-app.use('/api/simulations', simulationRoutes); // 👈 NUEVO
+app.use('/api/simulations', simulationRoutes);
+app.use('/api/catalog', catalogRoutes);
 
 // Servir OpenAPI (JSON) en caliente
 app.get('/openapi.json', async (_req: Request, res: Response) => {
