@@ -1,8 +1,14 @@
-import { Pool } from 'pg';
+// src/db.ts
+import { Pool, QueryResultRow } from 'pg'; // <-- 1. IMPORTACIÓN AÑADIDA
 import { config } from './config';
 
 const pool = config.databaseUrl
-  ? new Pool({ connectionString: config.databaseUrl })
+  ? new Pool({ 
+      connectionString: config.databaseUrl,
+      ssl: {
+        rejectUnauthorized: false // Necesario para conexiones a Render desde local
+      }
+    })
   : new Pool({
       host: config.pg.host,
       port: config.pg.port,
@@ -11,7 +17,8 @@ const pool = config.databaseUrl
       database: config.pg.database
     });
 
-export async function dbQuery<T = any>(text: string, params?: any[]): Promise<{ rows: T[] }> {
+// 2. RESTRICCIÓN AÑADIDA A <T>
+export async function dbQuery<T extends QueryResultRow>(text: string, params?: any[]): Promise<{ rows: T[] }> {
   const client = await pool.connect();
   try {
     const res = await client.query<T>(text, params);

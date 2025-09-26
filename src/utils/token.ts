@@ -1,11 +1,21 @@
-import jwt from 'jsonwebtoken';
+import jwt, { SignOptions } from 'jsonwebtoken';
 import crypto from 'crypto';
 import { config } from '../config';
 
 export type JwtUser = { sub: string; email: string; roles: string[] };
 
 export function signAccessToken(payload: JwtUser): string {
-  return jwt.sign(payload, config.jwtSecret, { expiresIn: process.env.ACCESS_TOKEN_TTL || '15m' });
+  // 1. Determinamos el valor del tiempo de expiración.
+  const tokenDuration = process.env.ACCESS_TOKEN_TTL || '15m';
+
+  // 2. Creamos el objeto de opciones.
+  const options: SignOptions = {
+    // 3. Usamos "as any" para forzar la asignación del tipo.
+    expiresIn: tokenDuration as any
+  };
+  
+  // 4. Pasamos el objeto a la función.
+  return jwt.sign(payload, config.jwtSecret, options);
 }
 
 export function verifyAccessToken(token: string): JwtUser {
