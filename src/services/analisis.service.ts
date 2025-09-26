@@ -12,6 +12,28 @@ import {
   UtilidadNeta
 } from '../types/analisis.types';
 
+// Tipos auxiliares para las consultas
+type CasoInfo = {
+  nombre_caso: string;
+  descripcion: string;
+  estado: string;
+  created_at: Date;
+};
+
+type Tributo = {
+  id: number;
+  concepto: string;
+  base_imponible: number;
+  tasa_aplicada: number;
+  monto_calculado: number;
+};
+
+type CasoSimple = {
+  id: number;
+  nombre_caso: string;
+  created_at: Date;
+};
+
 export class AnalisisService {
 
   static async validarCasoExiste(casoId: number, userId: string): Promise<boolean> {
@@ -47,7 +69,7 @@ export class AnalisisService {
     // Calcular utilidades
     const utilidadBruta = this.calcularUtilidadBruta(exportaciones, importaciones);
     const utilidadOperativa = this.calcularUtilidadOperativa(utilidadBruta, gastos.operativos);
-    const utilidadNeta = this.calcularUtilidadNeta(utilidadOperativa, gastos);
+    const utilidadNeta = this.calcularUtilidadNeta(utilidadOperativa, gastos, utilidadBruta);
 
     // Calcular resumen por monedas
     const resumenMonedas = this.calcularResumenMonedas(importaciones, exportaciones, gastos);
@@ -74,14 +96,15 @@ export class AnalisisService {
     return result;
   }
 
-  private static async obtenerInfoCaso(casoId: number) {
+  private static async obtenerInfoCaso(casoId: number): Promise<CasoInfo> {
     const sql = `
       SELECT nombre_caso, descripcion, estado, created_at
       FROM miaff.casos_de_estudio 
       WHERE id = $1
     `;
     
-    const { rows } = await dbQuery(sql, [casoId]);
+    // ✅ CORRECCIÓN: Se especifica el tipo <CasoInfo>
+    const { rows } = await dbQuery<CasoInfo>(sql, [casoId]);
     return rows[0];
   }
 
@@ -107,7 +130,8 @@ export class AnalisisService {
       ORDER BY i.fecha_operacion DESC, i.id DESC
     `;
 
-    const { rows } = await dbQuery(sql, [casoId]);
+    // ✅ CORRECCIÓN: Se especifica el tipo <ImportacionDetalle>
+    const { rows } = await dbQuery<ImportacionDetalle>(sql, [casoId]);
     const importaciones = rows;
 
     // Obtener tributos para cada importación
@@ -118,7 +142,7 @@ export class AnalisisService {
     return importaciones;
   }
 
-  private static async obtenerTributosImportacion(importacionId: number) {
+  private static async obtenerTributosImportacion(importacionId: number): Promise<Tributo[]> {
     const sql = `
       SELECT 
         id,
@@ -131,7 +155,8 @@ export class AnalisisService {
       ORDER BY concepto
     `;
 
-    const { rows } = await dbQuery(sql, [importacionId]);
+    // ✅ CORRECCIÓN: Se especifica el tipo <Tributo>
+    const { rows } = await dbQuery<Tributo>(sql, [importacionId]);
     return rows;
   }
 
@@ -152,7 +177,8 @@ export class AnalisisService {
       ORDER BY fecha_operacion DESC, id DESC
     `;
 
-    const { rows } = await dbQuery(sql, [casoId]);
+    // ✅ CORRECCIÓN: Se especifica el tipo <ExportacionDetalle>
+    const { rows } = await dbQuery<ExportacionDetalle>(sql, [casoId]);
     return rows;
   }
 
@@ -173,7 +199,8 @@ export class AnalisisService {
       ORDER BY g.fecha_gasto DESC, g.id DESC
     `;
 
-    const { rows } = await dbQuery(sql, [casoId]);
+    // ✅ CORRECCIÓN: Se especifica el tipo <GastoDetalle>
+    const { rows } = await dbQuery<GastoDetalle>(sql, [casoId]);
     const gastos = rows;
 
     // Agrupar por clasificación
@@ -204,37 +231,37 @@ export class AnalisisService {
     return gastosPorClasificacion;
   }
 
-private static calcularUtilidadBruta(
-  exportaciones: ExportacionDetalle[], 
-  importaciones: ImportacionDetalle[]
-): UtilidadBruta {
-  
-  // Calcular ventas totales (exportaciones + ventas nacionales)
-  const ventasTotales = exportaciones.reduce((total, exp) => {
-    // Asegurar que sea número y convertir todo a USD
-    const valorVenta = parseFloat(exp.valor_venta.toString()) || 0;
-    const valor = exp.moneda === 'USD' ? valorVenta : valorVenta / 3.75;
-    return total + valor;
-  }, 0);
+  private static calcularUtilidadBruta(
+    exportaciones: ExportacionDetalle[], 
+    importaciones: ImportacionDetalle[]
+  ): UtilidadBruta {
+    
+    // Calcular ventas totales (exportaciones + ventas nacionales)
+    const ventasTotales = exportaciones.reduce((total, exp) => {
+      // Asegurar que sea número y convertir todo a USD
+      const valorVenta = parseFloat(exp.valor_venta.toString()) || 0;
+      const valor = exp.moneda === 'USD' ? valorVenta : valorVenta / 3.75;
+      return total + valor;
+    }, 0);
 
-  // Calcular costo de adquisición (importaciones)
-  const costoAdquisicion = importaciones.reduce((total, imp) => {
-    // Asegurar que sean números
-    const valorCif = parseFloat(imp.valor_cif.toString()) || 0;
-    const dtaTotal = parseFloat(imp.dta_total.toString()) || 0;
-    return total + valorCif + dtaTotal;
-  }, 0);
+    // Calcular costo de adquisición (importaciones)
+    const costoAdquisicion = importaciones.reduce((total, imp) => {
+      // Asegurar que sean números
+      const valorCif = parseFloat(imp.valor_cif.toString()) || 0;
+      const dtaTotal = parseFloat(imp.dta_total.toString()) || 0;
+      return total + valorCif + dtaTotal;
+    }, 0);
 
-  const utilidadBruta = ventasTotales - costoAdquisicion;
-  const margenBrutoPorcentaje = ventasTotales > 0 ? (utilidadBruta / ventasTotales) * 100 : 0;
+    const utilidadBruta = ventasTotales - costoAdquisicion;
+    const margenBrutoPorcentaje = ventasTotales > 0 ? (utilidadBruta / ventasTotales) * 100 : 0;
 
-  return {
-    ventas_totales: parseFloat(ventasTotales.toFixed(2)),
-    costo_adquisicion: parseFloat(costoAdquisicion.toFixed(2)),
-    utilidad_bruta: parseFloat(utilidadBruta.toFixed(2)),
-    margen_bruto_porcentaje: parseFloat(margenBrutoPorcentaje.toFixed(2))
-  };
-}
+    return {
+      ventas_totales: parseFloat(ventasTotales.toFixed(2)),
+      costo_adquisicion: parseFloat(costoAdquisicion.toFixed(2)),
+      utilidad_bruta: parseFloat(utilidadBruta.toFixed(2)),
+      margen_bruto_porcentaje: parseFloat(margenBrutoPorcentaje.toFixed(2))
+    };
+  }
 
   private static calcularUtilidadOperativa(
     utilidadBruta: UtilidadBruta, 
@@ -243,7 +270,8 @@ private static calcularUtilidadBruta(
     
     const gastosOperativosTotal = gastosOperativos.reduce((total, gasto) => {
       // Convertir a USD si es necesario
-      const valor = gasto.moneda === 'USD' ? gasto.monto : gasto.monto / 3.75;
+      const monto = parseFloat(gasto.monto.toString()) || 0;
+      const valor = gasto.moneda === 'USD' ? monto : monto / 3.75;
       return total + valor;
     }, 0);
 
@@ -262,7 +290,8 @@ private static calcularUtilidadBruta(
 
   private static calcularUtilidadNeta(
     utilidadOperativa: UtilidadOperativa, 
-    gastos: GastosPorClasificacion
+    gastos: GastosPorClasificacion,
+    utilidadBruta: UtilidadBruta, // Se añade para tener acceso a ventas totales
   ): UtilidadNeta {
     
     const gastosAdministrativos = this.sumarGastos(gastos.administrativos);
@@ -272,9 +301,7 @@ private static calcularUtilidadBruta(
     const totalOtrosGastos = gastosAdministrativos + gastosVentas + gastosFinancieros;
     const utilidadNeta = utilidadOperativa.utilidad_operativa - totalOtrosGastos;
     
-    // Para calcular el margen neto, necesitamos las ventas totales
-    // Podemos obtenerlas del contexto anterior o recalcularlas
-    const ventasTotales = utilidadOperativa.utilidad_bruta + utilidadOperativa.gastos_operativos;
+    const ventasTotales = utilidadBruta.ventas_totales; // Se usa el valor correcto
     const margenNetoPorcentaje = ventasTotales > 0 
       ? (utilidadNeta / ventasTotales) * 100 
       : 0;
@@ -290,62 +317,62 @@ private static calcularUtilidadBruta(
     };
   }
 
-private static sumarGastos(gastos: GastoDetalle[]): number {
-  return gastos.reduce((total, gasto) => {
-    const monto = parseFloat(gasto.monto.toString()) || 0;
-    const valor = gasto.moneda === 'USD' ? monto : monto / 3.75;
-    return total + valor;
-  }, 0);
-}
+  private static sumarGastos(gastos: GastoDetalle[]): number {
+    return gastos.reduce((total, gasto) => {
+      const monto = parseFloat(gasto.monto.toString()) || 0;
+      const valor = gasto.moneda === 'USD' ? monto : monto / 3.75;
+      return total + valor;
+    }, 0);
+  }
 
-private static calcularResumenMonedas(
-  importaciones: ImportacionDetalle[], 
-  exportaciones: ExportacionDetalle[], 
-  gastos: GastosPorClasificacion
-) {
-  let totalUSD = 0;
-  let totalPEN = 0;
+  private static calcularResumenMonedas(
+    importaciones: ImportacionDetalle[], 
+    exportaciones: ExportacionDetalle[], 
+    gastos: GastosPorClasificacion
+  ) {
+    let totalUSD = 0;
+    let totalPEN = 0;
 
-  // Sumar exportaciones
-  exportaciones.forEach(exp => {
-    const valorVenta = parseFloat(exp.valor_venta.toString()) || 0;
-    if (exp.moneda === 'USD') {
-      totalUSD += valorVenta;
-    } else {
-      totalPEN += valorVenta;
-    }
-  });
+    // Sumar exportaciones
+    exportaciones.forEach(exp => {
+      const valorVenta = parseFloat(exp.valor_venta.toString()) || 0;
+      if (exp.moneda === 'USD') {
+        totalUSD += valorVenta;
+      } else {
+        totalPEN += valorVenta;
+      }
+    });
 
-  // Sumar importaciones (siempre en USD)
-  importaciones.forEach(imp => {
-    const valorCif = parseFloat(imp.valor_cif.toString()) || 0;
-    const dtaTotal = parseFloat(imp.dta_total.toString()) || 0;
-    totalUSD += valorCif + dtaTotal;
-  });
+    // Sumar importaciones (siempre en USD)
+    importaciones.forEach(imp => {
+      const valorCif = parseFloat(imp.valor_cif.toString()) || 0;
+      const dtaTotal = parseFloat(imp.dta_total.toString()) || 0;
+      totalUSD += valorCif + dtaTotal;
+    });
 
-  // Sumar gastos
-  const todosGastos = [
-    ...gastos.operativos,
-    ...gastos.administrativos,
-    ...gastos.ventas,
-    ...gastos.financieros
-  ];
+    // Sumar gastos
+    const todosGastos = [
+      ...gastos.operativos,
+      ...gastos.administrativos,
+      ...gastos.ventas,
+      ...gastos.financieros
+    ];
 
-  todosGastos.forEach(gasto => {
-    const monto = parseFloat(gasto.monto.toString()) || 0;
-    if (gasto.moneda === 'USD') {
-      totalUSD += monto;
-    } else {
-      totalPEN += monto;
-    }
-  });
+    todosGastos.forEach(gasto => {
+      const monto = parseFloat(gasto.monto.toString()) || 0;
+      if (gasto.moneda === 'USD') {
+        totalUSD += monto;
+      } else {
+        totalPEN += monto;
+      }
+    });
 
-  return {
-    total_usd: parseFloat(totalUSD.toFixed(2)),
-    total_pen: parseFloat(totalPEN.toFixed(2)),
-    tipo_cambio_sugerido: 3.75
-  };
-}
+    return {
+      total_usd: parseFloat(totalUSD.toFixed(2)),
+      total_pen: parseFloat(totalPEN.toFixed(2)),
+      tipo_cambio_sugerido: 3.75
+    };
+  }
 
   static async obtenerComparativo(userId: string, limite = 10) {
     // Obtener todos los casos del usuario
@@ -357,7 +384,8 @@ private static calcularResumenMonedas(
       LIMIT $2
     `;
     
-    const { rows } = await dbQuery(sql, [userId, limite]);
+    // ✅ CORRECCIÓN: Se especifica el tipo <CasoSimple>
+    const { rows } = await dbQuery<CasoSimple>(sql, [userId, limite]);
 
     if (rows.length === 0) {
       return {

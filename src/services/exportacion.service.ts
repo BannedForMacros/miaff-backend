@@ -9,8 +9,8 @@ export class ExportacionService {
       es_venta_nacional,
       incoterm,
       descripcion_venta,
-      pais_origen,     // <-- AÑADIDO
-      pais_destino,    // <-- AÑADIDO
+      pais_origen,      // <-- AÑADIDO
+      pais_destino,     // <-- AÑADIDO
       valor_venta,
       moneda,
       fecha_operacion
@@ -39,7 +39,8 @@ export class ExportacionService {
       fecha_operacion || new Date().toISOString().split('T')[0]
     ];
 
-    const { rows } = await dbQuery(sql, params);
+    // ✅ CORRECCIÓN: Se especifica el tipo <ExportacionDB> que debe devolver la consulta.
+    const { rows } = await dbQuery<ExportacionDB>(sql, params);
     return rows[0];
   }
 
@@ -59,12 +60,14 @@ export class ExportacionService {
 
     sql += ` ORDER BY fecha_operacion DESC, created_at DESC;`;
 
-    const { rows } = await dbQuery(sql, params);
+    // ✅ CORRECCIÓN: Se especifica el tipo <ExportacionDB> que debe devolver la consulta.
+    const { rows } = await dbQuery<ExportacionDB>(sql, params);
     return rows;
   }
 
   static async obtenerPorId(id: number, userId: string): Promise<ExportacionDB | null> {
-    const { rows } = await dbQuery(
+    // ✅ CORRECCIÓN: Se especifica el tipo <ExportacionDB> que debe devolver la consulta.
+    const { rows } = await dbQuery<ExportacionDB>(
       'SELECT * FROM miaff.exportaciones WHERE id = $1 AND user_id = $2',
       [id, userId]
     );

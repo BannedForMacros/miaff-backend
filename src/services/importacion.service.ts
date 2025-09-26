@@ -9,7 +9,8 @@ export class ImportacionService {
   
   static async obtenerTasaAdValorem(hs10: string): Promise<number | null> {
     try {
-      const { rows } = await dbQuery(
+      // ✅ CORRECCIÓN: Se especifica el tipo que retorna la consulta.
+      const { rows } = await dbQuery<{ tasa: string }>(
         'SELECT tasa FROM miaff.ad_valorem WHERE hs10 = $1',
         [hs10]
       );
@@ -22,7 +23,8 @@ export class ImportacionService {
 
   static async obtenerTasasImpuestos(): Promise<{ igv: number; ipm: number }> {
     try {
-      const { rows } = await dbQuery(
+      // ✅ CORRECCIÓN: Se especifica el tipo que retorna la consulta.
+      const { rows } = await dbQuery<{ codigo: string, tasa: string }>(
         'SELECT codigo, tasa FROM miaff.impuesto WHERE codigo IN ($1, $2)',
         ['IGV', 'IPM']
       );
@@ -121,7 +123,8 @@ export class ImportacionService {
     const calculado = this.calcularImportacion(data, tasasImpuestos);
 
     // 4. Insertar la importación principal en la base de datos
-    const { rows } = await dbQuery(
+    // ✅ CORRECCIÓN: Se especifica el tipo <ImportacionDB>
+    const { rows } = await dbQuery<ImportacionDB>(
       `INSERT INTO miaff.importaciones (
         caso_estudio_id, user_id, subpartida_hs10, descripcion_mercancia,
         moneda, valor_fob, valor_flete, valor_seguro,
@@ -151,6 +154,7 @@ export class ImportacionService {
 
     // 5. Insertar los tributos detallados en su tabla
     for (const tributo of calculado.tributos) {
+      // ✅ CORRECCIÓN: No se necesita tipo específico aquí ya que no usamos el resultado.
       await dbQuery(
         `INSERT INTO miaff.importacion_tributos (
           importacion_id, concepto, base_imponible, tasa_aplicada, monto_calculado
@@ -186,12 +190,14 @@ export class ImportacionService {
     
     sql += ` ORDER BY i.created_at DESC`;
     
-    const { rows } = await dbQuery(sql, params);
+    // ✅ CORRECCIÓN: Se especifica el tipo <ImportacionDB>
+    const { rows } = await dbQuery<ImportacionDB>(sql, params);
     return rows;
   }
 
   static async obtenerImportacion(id: string, user_id: string): Promise<{ importacion: ImportacionDB; tributos: TributoDB[] } | null> {
-    const { rows } = await dbQuery(
+    // ✅ CORRECCIÓN: Se especifica el tipo <ImportacionDB>
+    const { rows } = await dbQuery<ImportacionDB>(
       `SELECT i.*, ce.nombre_caso, s.descripcion as subpartida_descripcion
        FROM miaff.importaciones i
        JOIN miaff.casos_de_estudio ce ON ce.id = i.caso_estudio_id
@@ -205,7 +211,8 @@ export class ImportacionService {
     }
 
     // Obtener tributos
-    const { rows: tributos } = await dbQuery(
+    // ✅ CORRECCIÓN: Se especifica el tipo <TributoDB>
+    const { rows: tributos } = await dbQuery<TributoDB>(
       'SELECT concepto, base_imponible, tasa_aplicada, monto_calculado FROM miaff.importacion_tributos WHERE importacion_id = $1',
       [id]
     );

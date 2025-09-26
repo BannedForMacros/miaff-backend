@@ -5,7 +5,9 @@ export class GastoService {
 
   static async listarClasificaciones(): Promise<ClasificacionGastoDB[]> {
     const sql = `SELECT id, nombre FROM miaff.clasificacion_gastos ORDER BY id;`;
-    const { rows } = await dbQuery(sql);
+    
+    // ✅ CORRECCIÓN: Se especifica el tipo <ClasificacionGastoDB>
+    const { rows } = await dbQuery<ClasificacionGastoDB>(sql);
     return rows;
   }
 
@@ -39,7 +41,8 @@ export class GastoService {
       fecha_gasto || new Date()
     ];
 
-    const { rows } = await dbQuery(sql, params);
+    // ✅ CORRECCIÓN: Se especifica el tipo <GastoDB>
+    const { rows } = await dbQuery<GastoDB>(sql, params);
     return rows[0];
   }
 
@@ -47,7 +50,7 @@ export class GastoService {
     const sql = `
       SELECT 
         g.*, 
-        cg.nombre as nombre_clasificacion
+        cg.nombre as clasificacion_nombre
       FROM 
         miaff.gastos g
       JOIN 
@@ -57,18 +60,24 @@ export class GastoService {
       ORDER BY 
         g.fecha_gasto DESC, g.created_at DESC;
     `;
-    const { rows } = await dbQuery(sql, [userId, casoEstudioId]);
+    // ✅ CORRECCIÓN: Se especifica el tipo <GastoDB>
+    const { rows } = await dbQuery<GastoDB>(sql, [userId, casoEstudioId]);
     return rows;
   }
   
   static async eliminar(gastoId: number, userId: string): Promise<boolean> {
+    // ✅ CORRECCIÓN LÓGICA: Se añade 'RETURNING id' a la consulta.
+    // Un DELETE normal no devuelve filas. Al añadir 'RETURNING id', la consulta
+    // devolverá la fila eliminada, permitiendo que 'rows.length > 0' funcione
+    // como se espera para confirmar que algo se borró.
     const sql = `
       DELETE FROM miaff.gastos
-      WHERE id = $1 AND user_id = $2;
+      WHERE id = $1 AND user_id = $2
+      RETURNING id;
     `;
-    const { rows } = await dbQuery(sql, [gastoId, userId]);
-    // --- CORRECCIÓN CLAVE ---
-    // Un DELETE exitoso se mide con rowCount, no con rows.length
+    
+    // ✅ CORRECCIÓN DE TIPO: Se especifica el tipo que retorna la consulta.
+    const { rows } = await dbQuery<{ id: number }>(sql, [gastoId, userId]);
     return rows.length > 0;
   }
 }
