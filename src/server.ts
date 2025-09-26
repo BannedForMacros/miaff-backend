@@ -10,11 +10,15 @@ import authRoutes from './routes/auth.routes';
 import healthRoutes from './routes/health.routes';
 import simulationRoutes from './routes/simulation.routes';
 import catalogRoutes from './routes/catalog.routes';
- // 👈 }
+import profileRoutes from './routes/profile.routes';
+import casosDeEstudioRoutes from './routes/casosdeestudio.routes';
+import importacionRoutes from './routes/importaciones.routes';
+import exportacionRoutes from './routes/exportacion.routes';
+import gastosRoutes from './routes/gastos.routes';
+import analisisRoutes from './routes/analisis.routes';
 
 const app = express();
 
-// Si corres detrás de un proxy (nginx/railway/heroku), esto permite obtener la IP real en req.ip
 app.set('trust proxy', true);
 
 // Middlewares básicos
@@ -34,6 +38,17 @@ app.use('/api/health', healthRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/simulations', simulationRoutes);
 app.use('/api/catalog', catalogRoutes);
+app.use('/api/profile', profileRoutes);
+app.use('/api/casos-de-estudio', casosDeEstudioRoutes);
+app.use('/api/importaciones', importacionRoutes);
+app.use('/api/exportaciones', exportacionRoutes);
+app.use('/api/gastos', gastosRoutes);
+app.use('/api/rentability', analisisRoutes); 
+
+// Ruta raíz
+app.get('/', (_req: Request, res: Response) => {
+  res.json({ message: 'MIAFF API - Microservicio de Análisis de Importaciones y Finanzas' });
+});
 
 // Servir OpenAPI (JSON) en caliente
 app.get('/openapi.json', async (_req: Request, res: Response) => {
@@ -56,10 +71,11 @@ app.use(
   }),
 );
 
-// 404 (opcional)
+// 404 
 app.use((req: Request, res: Response) => {
   res.status(404).json({ message: `Not Found: ${req.method} ${req.originalUrl}` });
 });
+
 
 // Manejador de errores (fallback)
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

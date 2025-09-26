@@ -127,6 +127,12 @@ router.post('/register', async (req, res) => {
     [email, username ?? null, full_name, password_hash]
   );
   const user = created[0];
+    await dbQuery(
+    `INSERT INTO miaff.user_profile (user_id, xp, level)
+     VALUES ($1, 0, 1)
+     ON CONFLICT (user_id) DO NOTHING`,
+    [user.id]
+  );
 
   // Rol elegido (si no llega o no existe → 'estudiante')
   const desired = parsed.data.role_slug?.toLowerCase().trim();

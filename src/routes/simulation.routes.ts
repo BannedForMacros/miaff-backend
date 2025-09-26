@@ -1,281 +1,250 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { loadRuleProfile, simulate } from '../services/simulation.service';
+import { dbQuery } from '../db';
+import { loadRuleProfile, simulate, type ImporterProfile } from '../services/simulation.service';
 
 const router = Router();
-const normalizeHS = (s: string) => s.replace(/\D/g, '');
+const hs = (s: string) => s.replace(/\D/g, '');
 
-// ────────────────────────────────────────────────────────────────
-// JSON mode (ya lo tenías)
-const overridesSchema = z.object({
-  adValoremRate:     z.number().min(0).max(1).optional(),
-  antidumpingUsd:    z.number().min(0).optional(),
-  countervailingUsd: z.number().min(0).optional(),
-  perceptionRate:    z.number().min(0).max(1).optional(),
-  sdaUsd:            z.number().min(0).optional(),
-}).optional();
+const perfilMap: Record<string, ImporterProfile> = {
+  normal: 'normal',
+  primera_importacion: 'first_import',
+  no_habido: 'no_habido',
+  publico: 'public',
+  amazonia: 'amazon',
+};
 
-const bodySchema = z.object({
-  hs10:            z.string().min(8),
-  originCountry:   z.string().length(2),
-  useFTA:          z.boolean().optional(),
-  currency:        z.string().optional(),
-  fxRate:          z.number().positive(),
+function parsePercent(input: unknown): number | undefined {
+  if (input === undefined || input === null) return undefined;
+  let s = String(input).trim();
+  if (!s) return undefined;
+  s = s.replace('%', '').replace(',', '.').trim();
+  const n = Number(s);
+  if (!isFinite(n) || n < 0) return undefined;
+  return n > 1 ? n / 100 : n; // 50 -> 0.5 ; 0.5 -> 0.5
+}
 
-  cif:             z.number().min(0).optional(),
-  fob:             z.number().min(0).optional(),
-  freight:         z.number().min(0).optional(),
-  insurance:       z.number().min(0).optional(),
+const asBool = z.preprocess((v) => {
+  if (typeof v === 'boolean') return v;
+  const s = String(v ?? '').trim().toLowerCase();
+  if (['true','1','on','yes','si','sí'].includes(s)) return true;
+  if (['false','0','off','no'].includes(s)) return false;
+  return v;
+}, z.boolean());
 
-  quantity:        z.number().min(0).optional(),
-  quantityUnit:    z.string().optional(),
+/* =================== Zod: formulario (x-www-form-urlencoded) =================== */
+const formSchema = z.object({
+  subpartida:   z.string().min(8),
+  fob:          z.coerce.number().min(0),
+  flete:        z.coerce.number().min(0),
+  seguro:       z.coerce.number().min(0),
 
-  isUsed:          z.boolean().optional(),
-  importerProfile: z.enum(['normal','first_import','no_habido','public','amazon']).optional(),
+  perfil_importador: z.enum(['normal','primera_importacion','no_habido','publico','amazonia']).optional(),
+  es_usado:          asBool.optional(),
 
-  alcoholDegree:   z.number().min(0).optional(),
-  overrides:       overridesSchema,
-}).superRefine((val, ctx) => {
-  const hasCIF = typeof val.cif === 'number';
-  const hasFFS = typeof val.fob === 'number'
-              && typeof val.freight === 'number'
-              && typeof val.insurance === 'number';
-  if (!hasCIF && !hasFFS) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Debes enviar CIF o (FOB + Freight + Insurance).', path: ['cif'] });
-  }
+  // Toggles OBLIGATORIOS
+  habilitar_igv:        asBool,
+  habilitar_isc:        asBool,
+  habilitar_percepcion: asBool,
+
+  // % opcionales; se ignoran si el toggle respectivo está en false
+  isc_porcentaje:    z.union([z.string(), z.coerce.number()]).optional(),
+  percepcion_tasa:   z.union([z.string(), z.coerce.number()]).optional(),
+
+  antidumping_usd:    z.coerce.number().min(0).optional(),
+  compensatorio_usd:  z.coerce.number().min(0).optional(),
+  sda_usd:            z.coerce.number().min(0).optional(),
+
+  // NUEVO: si true, devolver también el asiento contable (preview)
+  generar_asiento:    asBool.optional().default(false),
 });
 
 /**
  * @openapi
- * /api/simulations/quote:
- *   post:
- *     tags: [Simulations]
- *     summary: "Ejecuta una simulación (JSON)"
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema: { $ref: '#/components/schemas/SimQuoteJson' }
- *     responses:
- *       200: { description: "OK" }
- *       400: { description: "Datos inválidos" }
+ * tags:
+ *   - name: Simulations
+ *     description: Cálculo de importación (Perú) en USD
  */
-router.post('/quote', async (req, res) => {
-  const parsed = bodySchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ message: 'Datos inválidos', errors: parsed.error.issues });
-  }
-  const data = parsed.data;
-  const hsNormalized = normalizeHS(data.hs10);
-  try {
-    const profile = await loadRuleProfile(hsNormalized, data.originCountry);
-    const result = simulate({
-      hs10: hsNormalized,
-      originCountry: data.originCountry,
-      useFTA: data.useFTA,
-      currency: data.currency,
-      fxRate: data.fxRate,
-      cif: data.cif,
-      fob: data.fob, freight: data.freight, insurance: data.insurance,
-      quantity: data.quantity, quantityUnit: data.quantityUnit,
-      isUsed: data.isUsed, importerProfile: data.importerProfile,
-      alcoholDegree: data.alcoholDegree,
-    }, profile, data.overrides);
-    return res.json(result);
-  } catch (err: any) {
-    console.error(err);
-    return res.status(400).json({ message: err?.message ?? 'No se pudo simular' });
-  }
-});
-
-// ────────────────────────────────────────────────────────────────
-// FORM mode (para Swagger como campos individuales)
-/**
- * Acepta application/x-www-form-urlencoded. Usamos z.coerce.* para transformar strings a números/booleans.
- */
-const formSchema = z.object({
-  hs10:            z.string().min(8),
-  originCountry:   z.string().length(2),
-  useFTA:          z.coerce.boolean().optional(),
-  currency:        z.string().optional(),
-  fxRate:          z.coerce.number().positive(),
-
-  cif:             z.coerce.number().optional(),
-  fob:             z.coerce.number().optional(),
-  freight:         z.coerce.number().optional(),
-  insurance:       z.coerce.number().optional(),
-
-  quantity:        z.coerce.number().optional(),
-  quantityUnit:    z.string().optional(),
-
-  isUsed:          z.coerce.boolean().optional(),
-  importerProfile: z.enum(['normal','first_import','no_habido','public','amazon']).optional(),
-
-  alcoholDegree:   z.coerce.number().optional(),
-
-  // overrides planos (no anidados)
-  override_adValoremRate:     z.coerce.number().optional(),
-  override_antidumpingUsd:    z.coerce.number().optional(),
-  override_countervailingUsd: z.coerce.number().optional(),
-  override_perceptionRate:    z.coerce.number().optional(),
-  override_sdaUsd:            z.coerce.number().optional(),
-}).superRefine((val, ctx) => {
-  const hasCIF = !isNaN(Number(val.cif));
-  const hasFFS = !isNaN(Number(val.fob)) && !isNaN(Number(val.freight)) && !isNaN(Number(val.insurance));
-  if (!hasCIF && !hasFFS) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Debes enviar CIF o (FOB + Freight + Insurance).', path: ['cif'] });
-  }
-});
 
 /**
  * @openapi
  * /api/simulations/quote-form:
  *   post:
- *     tags: [Simulations]
- *     summary: "Ejecuta una simulación (formulario, ideal para Swagger)"
+ *     tags:
+ *       - Simulations
+ *     summary: Simulación de importación (formulario) — resultados en USD
+ *     description: |
+ *       Orden: **CIF → A/V → (ISC) → IGV+IPM → (AD/CVD) → Percepción → SDA**.
+ *       - **CIF = FOB + Flete + Seguro** (automático, en USD).
+ *       - **A/V** se toma automáticamente de la BD por subpartida.
+ *       - **ISC**: si *Habilitar ISC* es **false**, el ISC=0 y se ignora `isc_porcentaje`.  
+ *         Si es **true**, `isc_porcentaje` se aplica a **(CIF + A/V)**; acepta **50**, **0.5** o **"50%"**.
+ *       - **IGV/IPM**: si *Habilitar IGV* es **false**, IGV=0 e IPM=0.
+ *       - **Percepción**: toggle propio (independiente de IGV/IPM).  
+ *         La base es: **(CIF + A/V + ISC) + IGV + IPM + AD/CVD**.
+ *       - **Asiento contable**: si envías `generar_asiento=true`, se incluye `asiento` (preview en **USD**, no persiste).
  *     requestBody:
  *       required: true
  *       content:
  *         application/x-www-form-urlencoded:
  *           schema:
  *             type: object
+ *             required:
+ *               - subpartida
+ *               - fob
+ *               - flete
+ *               - seguro
+ *               - habilitar_igv
+ *               - habilitar_isc
+ *               - habilitar_percepcion
  *             properties:
- *               hs10:           { type: string, example: "4819.10.00.00" }
- *               originCountry:  { type: string, example: "CN" }
- *               useFTA:         { type: boolean, example: false }
- *               fxRate:         { type: number, example: 1 }
- *               cif:            { type: number, example: 190073 }
- *               fob:            { type: number, example: 167133 }
- *               freight:        { type: number, example: 22656 }
- *               insurance:      { type: number, example: 284 }
- *               quantity:       { type: number, example: 0 }
- *               importerProfile:
+ *               subpartida:
  *                 type: string
- *                 enum: [normal, first_import, no_habido, public, amazon]
+ *                 title: Subpartida nacional (HS10, sin puntos)
+ *                 example: "4819100000"
+ *               fob:      { type: number, title: "FOB (USD)",    example: 167133 }
+ *               flete:    { type: number, title: "Flete (USD)",  example: 22656 }
+ *               seguro:   { type: number, title: "Seguro (USD)", example: 284 }
+ *               perfil_importador:
+ *                 type: string
+ *                 title: Perfil del importador
+ *                 enum: [normal, primera_importacion, no_habido, publico, amazonia]
  *                 example: normal
- *               override_adValoremRate:     { type: number, example: 0.06 }
- *               override_antidumpingUsd:    { type: number, example: 300 }
- *               override_countervailingUsd: { type: number, example: 100 }
- *               override_perceptionRate:    { type: number, example: 0.035 }
- *               override_sdaUsd:            { type: number, example: 53 }
+ *               es_usado: { type: boolean, title: "¿Bien usado?", example: false }
+ *               habilitar_igv:        { type: boolean, title: "Habilitar IGV/IPM", example: true }
+ *               habilitar_isc:        { type: boolean, title: "Habilitar ISC",     example: false }
+ *               habilitar_percepcion: { type: boolean, title: "Habilitar percepción", example: true }
+ *               isc_porcentaje:
+ *                 type: string
+ *                 title: ISC % sobre (CIF + A/V) — acepta 50, 0.5 o "50%"
+ *                 example: "0"
+ *               percepcion_tasa:
+ *                 type: string
+ *                 title: Percepción IGV — acepta 3.5, 0.035 o "3.5%"
+ *                 example: "3.5"
+ *               antidumping_usd:   { type: number, title: "Antidumping (USD)",   example: 0 }
+ *               compensatorio_usd: { type: number, title: "Compensatorio (USD)", example: 0 }
+ *               sda_usd:           { type: number, title: "SDA (USD, manual)",   example: 20 }
+ *               generar_asiento:   { type: boolean, title: "Incluir asiento contable (preview)", example: true }
  *     responses:
- *       200: { description: "OK" }
- *       400: { description: "Datos inválidos" }
+ *       200: { description: OK }
+ *       400: { description: Datos inválidos }
  */
 router.post('/quote-form', async (req, res) => {
   const parsed = formSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ message: 'Datos inválidos', errors: parsed.error.issues });
-  }
+  if (!parsed.success) return res.status(400).json({ message: 'Datos inválidos', errors: parsed.error.issues });
   const f = parsed.data;
-  const hsNormalized = normalizeHS(f.hs10);
+
+  // % (se ignoran si su toggle está en false)
+  const iscRate  = f.habilitar_isc        ? parsePercent(f.isc_porcentaje)  : undefined;
+  if (iscRate !== undefined && (iscRate < 0 || iscRate > 1)) {
+    return res.status(400).json({ message: 'isc_porcentaje debe ser un porcentaje válido (ej. 50, 0.5 o "50%").' });
+  }
+  const percRate = f.habilitar_percepcion ? parsePercent(f.percepcion_tasa) : undefined;
+  if (percRate !== undefined && (percRate < 0 || percRate > 1)) {
+    return res.status(400).json({ message: 'percepcion_tasa debe ser un porcentaje válido (ej. 3.5, 0.035 o "3.5%").' });
+  }
+
   try {
-    const profile = await loadRuleProfile(hsNormalized, f.originCountry);
+    const perfil = await loadRuleProfile(hs(f.subpartida));
+    const cifUsd = (f.fob ?? 0) + (f.flete ?? 0) + (f.seguro ?? 0);
 
-    const overrides =
-      (f.override_adValoremRate ||
-       f.override_antidumpingUsd ||
-       f.override_countervailingUsd ||
-       f.override_perceptionRate ||
-       f.override_sdaUsd) ? {
-         adValoremRate:     f.override_adValoremRate,
-         antidumpingUsd:    f.override_antidumpingUsd,
-         countervailingUsd: f.override_countervailingUsd,
-         perceptionRate:    f.override_perceptionRate,
-         sdaUsd:            f.override_sdaUsd,
-       } : undefined;
+    const result = simulate(
+      {
+        hs10: hs(f.subpartida),
+        // fxRate: eliminado → los cálculos son en USD
+        cif: cifUsd,
+        importerProfile: f.perfil_importador ? perfilMap[f.perfil_importador] : undefined,
+        isUsed: f.es_usado,
+      },
+      perfil,
+      {
+        igvEnabled:         f.habilitar_igv,
+        iscEnabled:         f.habilitar_isc,
+        perceptionEnabled:  f.habilitar_percepcion,
+        iscRate,
+        antidumpingUsd:     f.antidumping_usd,
+        countervailingUsd:  f.compensatorio_usd,
+        perceptionRate:     percRate,
+        sdaUsd:             f.sda_usd,
+      }
+    );
 
-    const result = simulate({
-      hs10: hsNormalized,
-      originCountry: f.originCountry,
-      useFTA: f.useFTA,
-      currency: f.currency,
-      fxRate: f.fxRate,
-      cif: f.cif,
-      fob: f.fob, freight: f.freight, insurance: f.insurance,
-      quantity: f.quantity, quantityUnit: f.quantityUnit,
-      isUsed: f.isUsed, importerProfile: f.importerProfile,
-      alcoholDegree: f.alcoholDegree,
-    }, profile, overrides);
+    // Si NO piden asiento, responder solo simulación (en USD)
+    if (!f.generar_asiento) {
+      return res.json(result);
+    }
 
-    return res.json(result);
+    // ───────────────────────────────────────────
+    // Asiento contable (preview) en USD usando TU BD
+    // ───────────────────────────────────────────
+    const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+    // 1) Cuenta de bienes por subpartida (subpartida.cuenta_id → cuenta_contable)
+    const bienesRes = await dbQuery<{ codigo: string; nombre: string }>(
+      `
+      SELECT c.codigo, c.nombre
+        FROM miaff.subpartida s
+        JOIN miaff.cuenta_contable c ON c.id = s.cuenta_id
+       WHERE s.hs10 = $1
+       LIMIT 1
+      `,
+      [hs(f.subpartida)]
+    );
+    const cuentaBienes = bienesRes.rows[0] ?? { codigo: '601', nombre: 'Mercaderías' };
+
+    // 2) Cuentas estándar (jalar nombres desde BD)
+    const standarCodes = ['4015','4012','40111','40113','609','421'];
+    const stdRes = await dbQuery<{ codigo: string; nombre: string }>(
+      `SELECT codigo, nombre FROM miaff.cuenta_contable WHERE codigo = ANY($1::text[])`,
+      [standarCodes]
+    );
+    const mapStd = new Map(stdRes.rows.map(r => [r.codigo, r.nombre]));
+    const nombre = (cod: string, def: string) => mapStd.get(cod) ?? def;
+
+    // 3) Montos (USD) desde la simulación
+    // Se asume que 'result' ya expresa montos en USD al no proveer fxRate
+    const cifUsdx     = r2(cifUsd);
+    const avAmtUsd    = r2(result.arancel?.amount || 0);
+    const iscAmtUsd   = r2(result.isc?.total || 0);
+    const igvTotUsd   = r2((result.igv?.igv16 || 0) + (result.igv?.ipm2 || 0)); // IGV+IPM juntos en 40111
+    const remediosUsd = r2(result.trade_remedies?.total || 0);
+    const sdaAmtUsd   = r2(result.sda?.amount || 0);
+    const costosVinc  = r2(remediosUsd + sdaAmtUsd);                              // 609
+    const percepUsd   = r2(result.percepcion?.amount || 0);
+
+    // 4) Líneas (todas en DEBE excepto 421)
+    const lineas: Array<{ cuenta: string; denominacion: string; debe: number; haber: number }> = [
+      { cuenta: cuentaBienes.codigo, denominacion: cuentaBienes.nombre, debe: cifUsdx,    haber: 0 },
+      { cuenta: '4015',  denominacion: nombre('4015','Derechos aduaneros'),               debe: avAmtUsd,   haber: 0 },
+      { cuenta: '4012',  denominacion: nombre('4012','Impuesto Selectivo al Consumo'),    debe: iscAmtUsd,  haber: 0 },
+      { cuenta: '40111', denominacion: nombre('40111','IGV – Cuenta propia'),             debe: igvTotUsd,  haber: 0 },
+      { cuenta: '609',   denominacion: nombre('609','Costos vinculados con las compras'), debe: costosVinc, haber: 0 },
+      { cuenta: '40113', denominacion: nombre('40113','IGV – Régimen de percepciones'),   debe: percepUsd,  haber: 0 },
+    ];
+
+    // 5) Totales y contrapartida 421
+    const debeTotal  = r2(lineas.reduce((s, l) => s + l.debe, 0));
+    const haberTotal = debeTotal;
+    lineas.push({
+      cuenta: '421',
+      denominacion: nombre('421','Facturas, boletas y otros comprobantes por pagar'),
+      debe: 0,
+      haber: haberTotal
+    });
+
+    const asiento = {
+      moneda: 'USD',
+      lineas,
+      debe_total: debeTotal,
+      haber_total: haberTotal,
+    };
+
+    return res.json({ ...result, asiento });
   } catch (err: any) {
     console.error(err);
     return res.status(400).json({ message: err?.message ?? 'No se pudo simular' });
   }
 });
 
-// ────────────────────────────────────────────────────────────────
-// Preprofile para pintar el wizard
-/**
- * @openapi
- * /api/simulations/preprofile:
- *   get:
- *     tags: [Simulations]
- *     summary: "Perfil de reglas (MFN/TLC, ISC, IGV/IPM, remedios, UIT/SDA)"
- *     parameters:
- *       - in: query
- *         name: hs10
- *         schema: { type: string }
- *         required: true
- *       - in: query
- *         name: originCountry
- *         schema: { type: string }
- *         required: true
- *     responses:
- *       200: { description: "OK" }
- *       400: { description: "Datos inválidos" }
- */
-router.get('/preprofile', async (req, res) => {
-  const schema = z.object({ hs10: z.string().min(8), originCountry: z.string().length(2) });
-  const parsed = schema.safeParse(req.query);
-  if (!parsed.success) return res.status(400).json({ message: 'Datos inválidos', errors: parsed.error.issues });
-  const hs = normalizeHS(parsed.data.hs10);
-  try {
-    const prof = await loadRuleProfile(hs, parsed.data.originCountry);
-    res.json({
-      hs10: prof.hs10,
-      description: prof.description,
-      mfnRate: prof.mfnRate,
-      ftaAvailable: prof.ftaRate !== null,
-      isc: prof.iscRule ? { system: prof.iscRule.system, unit: prof.iscRule.unit } : { system: 'none' as const },
-      vatExempt: prof.vatExempt,
-      tradeRemedies: prof.tradeRemedies.map(t => ({ type: t.type, mode: t.mode })),
-      adminFees: prof.adminFees,
-    });
-  } catch (e:any) {
-    res.status(400).json({ message: e?.message ?? 'No se pudo cargar el preperfil' });
-  }
-});
-
 export default router;
-
-/**
- * @openapi
- * components:
- *   schemas:
- *     SimQuoteJson:
- *       type: object
- *       properties:
- *         hs10: { type: string, example: "4819.10.00.00" }
- *         originCountry: { type: string, example: "CN" }
- *         useFTA: { type: boolean, example: false }
- *         fxRate: { type: number, example: 1 }
- *         cif: { type: number, example: 190073 }
- *         fob: { type: number, example: 167133 }
- *         freight: { type: number, example: 22656 }
- *         insurance: { type: number, example: 284 }
- *         quantity: { type: number, example: 0 }
- *         importerProfile:
- *           type: string
- *           enum: [normal, first_import, no_habido, public, amazon]
- *           example: normal
- *         overrides:
- *           type: object
- *           properties:
- *             adValoremRate:     { type: number, example: 0.06 }
- *             antidumpingUsd:    { type: number, example: 300 }
- *             countervailingUsd: { type: number, example: 100 }
- *             perceptionRate:    { type: number, example: 0.035 }
- *             sdaUsd:            { type: number, example: 53 }
- */
