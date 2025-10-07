@@ -60,6 +60,11 @@ const router = Router();
  *         dta_total:
  *           type: number
  *           example: 335.24
+ *         activo:
+ *           type: integer
+ *           enum: [0, 1]
+ *           example: 1
+ *           description: "1 = activo, 0 = eliminado"
  *         fecha_operacion:
  *           type: string
  *           format: date
@@ -97,7 +102,7 @@ const router = Router();
  * /api/importaciones:
  *   get:
  *     tags: [Importaciones]
- *     summary: Obtiene todas las importaciones del usuario autenticado
+ *     summary: Obtiene todas las importaciones activas del usuario autenticado
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -108,7 +113,7 @@ const router = Router();
  *         description: Filtrar por caso de estudio
  *     responses:
  *       '200':
- *         description: Lista de importaciones
+ *         description: Lista de importaciones activas
  *         content:
  *           application/json:
  *             schema:
@@ -241,6 +246,7 @@ router.post('/', requireAuth, ImportacionController.crearImportacion);
  *         required: true
  *         schema:
  *           type: integer
+ *         description: ID de la importación
  *     responses:
  *       '200':
  *         description: Importación encontrada
@@ -255,11 +261,129 @@ router.post('/', requireAuth, ImportacionController.crearImportacion);
  *                       type: array
  *                       items:
  *                         $ref: '#/components/schemas/Tributo'
+ *       '400':
+ *         description: ID inválido
  *       '404':
  *         description: Importación no encontrada
  *       '500':
  *         description: Error interno del servidor
+ *   put:
+ *     tags: [Importaciones]
+ *     summary: Actualiza una importación existente
+ *     description: Actualiza los datos de una importación y recalcula automáticamente todos los tributos
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: ID de la importación
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               caso_estudio_id:
+ *                 type: integer
+ *                 example: 1
+ *               subpartida_hs10:
+ *                 type: string
+ *                 example: "4819100000"
+ *               descripcion_mercancia:
+ *                 type: string
+ *                 example: "Cajas de cartón corrugado"
+ *               moneda:
+ *                 type: string
+ *                 enum: [USD, PEN]
+ *                 example: "USD"
+ *               valor_fob:
+ *                 type: number
+ *                 example: 1000.00
+ *               valor_flete:
+ *                 type: number
+ *                 example: 150.00
+ *               valor_seguro:
+ *                 type: number
+ *                 example: 50.00
+ *               habilitar_igv:
+ *                 type: boolean
+ *               habilitar_isc:
+ *                 type: boolean
+ *               habilitar_percepcion:
+ *                 type: boolean
+ *               ad_valorem_tasa_manual:
+ *                 type: number
+ *                 minimum: 0
+ *                 maximum: 1
+ *               isc_tasa_ingresada:
+ *                 type: number
+ *                 minimum: 0
+ *                 maximum: 1
+ *               percepcion_tasa_ingresada:
+ *                 type: number
+ *                 minimum: 0
+ *                 maximum: 1
+ *               antidumping_ingresado:
+ *                 type: number
+ *                 minimum: 0
+ *               compensatorio_ingresado:
+ *                 type: number
+ *                 minimum: 0
+ *               sda_ingresado:
+ *                 type: number
+ *                 minimum: 0
+ *               fecha_operacion:
+ *                 type: string
+ *                 format: date
+ *     responses:
+ *       '200':
+ *         description: Importación actualizada exitosamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/Importacion'
+ *                 - type: object
+ *                   properties:
+ *                     tributos:
+ *                       type: array
+ *                       items:
+ *                         $ref: '#/components/schemas/Tributo'
+ *       '400':
+ *         description: Datos inválidos o ID inválido
+ *       '404':
+ *         description: Importación no encontrada o no autorizada
+ *       '500':
+ *         description: Error interno del servidor
+ *   delete:
+ *     tags: [Importaciones]
+ *     summary: Elimina una importación (soft delete)
+ *     description: Marca la importación como inactiva (activo = 0) en lugar de eliminarla físicamente
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: ID de la importación
+ *     responses:
+ *       '204':
+ *         description: Importación eliminada exitosamente
+ *       '400':
+ *         description: ID inválido
+ *       '404':
+ *         description: Importación no encontrada o no autorizada
+ *       '500':
+ *         description: Error interno del servidor
  */
 router.get('/:id', requireAuth, ImportacionController.obtenerImportacion);
+router.put('/:id', requireAuth, ImportacionController.actualizarImportacion);
+router.delete('/:id', requireAuth, ImportacionController.eliminarImportacion);
 
 export default router;
