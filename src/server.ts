@@ -16,6 +16,8 @@ import importacionRoutes from './routes/importaciones.routes';
 import exportacionRoutes from './routes/exportacion.routes';
 import gastosRoutes from './routes/gastos.routes';
 import analisisRoutes from './routes/analisis.routes';
+import dotenv from 'dotenv';
+dotenv.config();
 
 const app = express();
 

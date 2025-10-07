@@ -5,6 +5,8 @@ import { dbQuery } from '../db';
 import { hashPassword, verifyPassword } from '../utils/password';
 import { generateRefreshToken, JwtUser, signAccessToken, sha256 } from '../utils/token';
 import { requireAuth, requireRole } from '../middlewares/requireAuth';
+import { randomBytes } from 'crypto';
+import nodemailer from 'nodemailer';
 
 const router = Router();
 
@@ -31,6 +33,15 @@ const refreshSchema = z.object({
 const assignRoleSchema = z.object({
   user_id: z.string().uuid(),
   role_slug: z.string().min(2),
+});
+
+const requestResetSchema = z.object({
+    email: z.string().email(),
+});
+
+const resetPasswordSchema = z.object({
+    token: z.string().min(10),
+    password: z.string().min(8),
 });
 
 /* ===================== Helpers ===================== */
@@ -63,6 +74,58 @@ async function getAllRoles() {
       ORDER BY name ASC`
   );
   return rows;
+}
+async function sendPasswordResetEmail(email: string, token: string) {
+    const transporter = nodemailer.createTransport({
+        host: process.env.EMAIL_HOST,
+        port: parseInt(process.env.EMAIL_PORT || '587'),
+        secure: false,
+        auth: {
+            user: process.env.EMAIL_USER,
+            pass: process.env.EMAIL_PASS,
+        },
+    });
+
+    const resetLink = `miaff://reset-password?token=${token}`;
+
+    // --- ✅ ESTA ES LA PARTE IMPORTANTE ---
+    // Usamos la propiedad `html` en lugar de `text`
+    const mailOptions = {
+        from: '"MIIAF App" <no-reply@miiaf.com>',
+        to: email,
+        subject: 'Recuperación de Contraseña',
+        html: `
+      <div style="font-family: Arial, sans-serif; text-align: center; color: #333;">
+        <h2 style="color: #0E1A2A;">Recuperación de Contraseña</h2>
+        <p>Has solicitado restablecer tu contraseña para tu cuenta en MIIAF App.</p>
+        <p>Haz clic en el siguiente botón para continuar:</p>
+        <a 
+          href="${resetLink}" 
+          style="
+            background-color: #D4AF37; 
+            color: #1b1205; 
+            padding: 15px 25px; 
+            text-decoration: none; 
+            border-radius: 5px; 
+            display: inline-block;
+            font-weight: bold;
+          "
+        >
+          Restablecer Contraseña
+        </a>
+        <p style="margin-top: 20px;">
+          Si no puedes hacer clic en el botón, copia y pega el siguiente enlace en tu navegador:<br>
+          <span style="color: #888; font-size: 12px;">${resetLink}</span>
+        </p>
+        <p style="font-size: 12px; color: #888;">
+          Este enlace expirará en 15 minutos.
+        </p>
+      </div>
+    `,
+    };
+    // ------------------------------------
+
+    await transporter.sendMail(mailOptions);
 }
 
 /* ===================== Endpoints ===================== */
@@ -389,5 +452,126 @@ router.get('/me', requireAuth, (req, res) => {
   const me = (req as any).user as JwtUser;
   res.json({ user: me });
 });
+/**
+ * @openapi
+ * /api/auth/request-reset:
+ *   post:
+ *     tags:
+ *       - Auth
+ *     summary: Solicita un enlace para restablecer la contraseña
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *     responses:
+ *       200:
+ *         description: Si el usuario existe, se envió un correo
+ */
+router.post('/request-reset', async (req, res) => {
+    const parsed = requestResetSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: 'Email inválido' });
+
+    const { email } = parsed.data;
+    const { rows } = await dbQuery<{ id: string }>(
+        `SELECT id FROM miaff.users WHERE email = $1`,
+        [email]
+    );
+    const user = rows[0];
+
+    if (user) {
+        const token = randomBytes(32).toString('hex');
+        const tokenHash = sha256(token);
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutos
+
+        await dbQuery(
+            `INSERT INTO miaff.password_resets (user_id, token_hash, expires_at)
+             VALUES ($1, $2, $3)`,
+            [user.id, tokenHash, expiresAt]
+        );
+
+        await sendPasswordResetEmail(email, token);
+    }
+
+    res.json({
+        message:
+            'Si existe una cuenta con ese email, recibirás un enlace para restablecer tu contraseña.',
+    });
+});
+
+/**
+ * @openapi
+ * /api/auth/reset-password:
+ *   post:
+ *     tags:
+ *       - Auth
+ *     summary: Establece una nueva contraseña usando un token válido
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - token
+ *               - password
+ *             properties:
+ *               token:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *                 minLength: 8
+ *     responses:
+ *       204:
+ *         description: Contraseña actualizada con éxito
+ *       400:
+ *         description: Token inválido, expirado o datos incorrectos
+ */
+router.post('/reset-password', async (req, res) => {
+    const parsed = resetPasswordSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: 'Datos inválidos' });
+
+    const { token, password } = parsed.data;
+    const tokenHash = sha256(token);
+
+    const { rows } = await dbQuery<{ user_id: string }>(
+        `SELECT user_id FROM miaff.password_resets
+         WHERE token_hash = $1 AND expires_at > NOW() AND used_at IS NULL`,
+        [tokenHash]
+    );
+    const resetRequest = rows[0];
+
+    if (!resetRequest) {
+        return res.status(400).json({ message: 'El token es inválido o ha expirado.' });
+    }
+
+    const { user_id } = resetRequest;
+    const password_hash = await hashPassword(password);
+
+    await dbQuery(`UPDATE miaff.users SET password_hash = $1 WHERE id = $2`, [
+        password_hash,
+        user_id,
+    ]);
+
+    await dbQuery(`UPDATE miaff.password_resets SET used_at = NOW() WHERE token_hash = $1`, [
+        tokenHash,
+    ]);
+
+    // Revocar sesiones activas por seguridad
+    await dbQuery(`UPDATE miaff.auth_sessions SET revoked_at = NOW() WHERE user_id = $1`, [
+        user_id,
+    ]);
+
+    res.status(204).send();
+});
+
+
 
 export default router;
