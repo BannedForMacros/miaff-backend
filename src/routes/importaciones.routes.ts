@@ -382,6 +382,52 @@ router.post('/', requireAuth, ImportacionController.crearImportacion);
  *       '500':
  *         description: Error interno del servidor
  */
+
+/**
+ * @openapi
+ * /api/importaciones/{id}/asiento-contable:
+ *   get:
+ *     tags:
+ *       - Importaciones
+ *     summary: Obtiene el asiento contable de una importación específica
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: ID de la importación
+ *     responses:
+ *       '200':
+ *         description: Asiento contable generado exitosamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 lineas:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       cuenta:
+ *                         type: string
+ *                       denominacion:
+ *                         type: string
+ *                       debe:
+ *                         type: number
+ *                       haber:
+ *                         type: number
+ *                 totalDebe:
+ *                   type: number
+ *                 totalHaber:
+ *                   type: number
+ *       '404':
+ *         description: Importación no encontrada
+ */
+router.get('/:id/asiento-contable', requireAuth, ImportacionController.obtenerAsientoContable);
 router.get('/:id', requireAuth, ImportacionController.obtenerImportacion);
 router.put('/:id', requireAuth, ImportacionController.actualizarImportacion);
 router.delete('/:id', requireAuth, ImportacionController.eliminarImportacion);

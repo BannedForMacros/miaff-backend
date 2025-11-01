@@ -16,7 +16,11 @@ import importacionRoutes from './routes/importaciones.routes';
 import exportacionRoutes from './routes/exportacion.routes';
 import gastosRoutes from './routes/gastos.routes';
 import analisisRoutes from './routes/analisis.routes';
+import tributosRoutes from './routes/tributos.routes';
+import quizRoutes from './routes/quiz.routes';
+import exchangeRateRoutes from './routes/exchangeRate.routes';
 import dotenv from 'dotenv';
+import tutorialesRoutes from "./routes/tutoriales.routes";
 dotenv.config();
 
 const app = express();
@@ -45,7 +49,11 @@ app.use('/api/casos-de-estudio', casosDeEstudioRoutes);
 app.use('/api/importaciones', importacionRoutes);
 app.use('/api/exportaciones', exportacionRoutes);
 app.use('/api/gastos', gastosRoutes);
-app.use('/api/rentability', analisisRoutes); 
+app.use('/api/rentability', analisisRoutes);
+app.use('/api/tributos', tributosRoutes);
+app.use('/api/quiz', quizRoutes);
+app.use('/api/exchange-rate', exchangeRateRoutes);
+app.use ('/api/tutoriales',tutorialesRoutes)
 
 // Ruta raíz
 app.get('/', (_req: Request, res: Response) => {

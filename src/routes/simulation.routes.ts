@@ -6,57 +6,113 @@ import { loadRuleProfile, simulate, type ImporterProfile } from '../services/sim
 const router = Router();
 const hs = (s: string) => s.replace(/\D/g, '');
 
-const perfilMap: Record<string, ImporterProfile> = {
-  normal: 'normal',
-  primera_importacion: 'first_import',
-  no_habido: 'no_habido',
-  publico: 'public',
-  amazonia: 'amazon',
-};
+/**
+ * @openapi
+ * /api/simulations/advalorem/{hs10}:
+ *   get:
+ *     tags:
+ *       - Simulations
+ *     summary: Obtener tasa de Ad-Valorem para una subpartida
+ *     parameters:
+ *       - name: hs10
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Código HS10 de la subpartida (10 dígitos)
+ *     responses:
+ *       200:
+ *         description: Tasa encontrada o null si no existe
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 hs10:
+ *                   type: string
+ *                 tasa:
+ *                   type: number
+ *                   nullable: true
+ *       404:
+ *         description: Subpartida no encontrada
+ */
+router.get('/advalorem/:hs10', async (req, res) => {
+    try {
+        const { hs10 } = req.params;
+        const cleanHs10 = hs(hs10);
+
+        console.log(`[Ad-Valorem] Consultando HS10: ${cleanHs10}`);
+
+        const result = await dbQuery<{ tasa: number | null }>(
+            `SELECT tasa FROM miaff.ad_valorem WHERE hs10 = $1 LIMIT 1`,
+            [cleanHs10]
+        );
+
+        console.log(`[Ad-Valorem] Resultados encontrados: ${result.rows.length}`, result.rows);
+
+        if (result.rows.length > 0) {
+            console.log(`[Ad-Valorem] Tasa encontrada: ${result.rows[0].tasa}`);
+            return res.json({ hs10: cleanHs10, tasa: result.rows[0].tasa });
+        } else {
+            console.log(`[Ad-Valorem] No se encontró tasa para HS10: ${cleanHs10}`);
+            return res.json({ hs10: cleanHs10, tasa: null });
+        }
+    } catch (err: any) {
+        console.error('[Ad-Valorem] Error:', err);
+        return res.status(500).json({ message: 'Error consultando Ad-Valorem' });
+    }
+});
 
 function parsePercent(input: unknown): number | undefined {
-  if (input === undefined || input === null) return undefined;
-  let s = String(input).trim();
-  if (!s) return undefined;
-  s = s.replace('%', '').replace(',', '.').trim();
-  const n = Number(s);
-  if (!isFinite(n) || n < 0) return undefined;
-  return n > 1 ? n / 100 : n; // 50 -> 0.5 ; 0.5 -> 0.5
+    if (input === undefined || input === null) return undefined;
+    let s = String(input).trim();
+    if (!s) return undefined;
+    s = s.replace('%', '').replace(',', '.').trim();
+    const n = Number(s);
+    if (!isFinite(n) || n < 0) return undefined;
+    return n > 1 ? n / 100 : n; // 50 -> 0.5 ; 0.5 -> 0.5
 }
 
 const asBool = z.preprocess((v) => {
-  if (typeof v === 'boolean') return v;
-  const s = String(v ?? '').trim().toLowerCase();
-  if (['true','1','on','yes','si','sí'].includes(s)) return true;
-  if (['false','0','off','no'].includes(s)) return false;
-  return v;
+    if (typeof v === 'boolean') return v;
+    const s = String(v ?? '').trim().toLowerCase();
+    if (['true','1','on','yes','si','sí'].includes(s)) return true;
+    if (['false','0','off','no'].includes(s)) return false;
+    return v;
 }, z.boolean());
 
 /* =================== Zod: formulario (x-www-form-urlencoded) =================== */
 const formSchema = z.object({
-  subpartida:   z.string().min(8),
-  fob:          z.coerce.number().min(0),
-  flete:        z.coerce.number().min(0),
-  seguro:       z.coerce.number().min(0),
+    subpartida:   z.string().min(8),
+    fob:          z.coerce.number().min(0),
+    flete:        z.coerce.number().min(0),
+    seguro:       z.coerce.number().min(0),
 
-  perfil_importador: z.enum(['normal','primera_importacion','no_habido','publico','amazonia']).optional(),
-  es_usado:          asBool.optional(),
+    // NUEVO: Ad-Valorem manual
+    advalorem_porcentaje: z.union([z.string(), z.coerce.number()]).optional(),
 
-  // Toggles OBLIGATORIOS
-  habilitar_igv:        asBool,
-  habilitar_isc:        asBool,
-  habilitar_percepcion: asBool,
+    es_usado: asBool.optional(),
 
-  // % opcionales; se ignoran si el toggle respectivo está en false
-  isc_porcentaje:    z.union([z.string(), z.coerce.number()]).optional(),
-  percepcion_tasa:   z.union([z.string(), z.coerce.number()]).optional(),
+    // Toggles OBLIGATORIOS
+    habilitar_igv:        asBool,
+    habilitar_isc:        asBool,
+    habilitar_percepcion: asBool,
 
-  antidumping_usd:    z.coerce.number().min(0).optional(),
-  compensatorio_usd:  z.coerce.number().min(0).optional(),
-  sda_usd:            z.coerce.number().min(0).optional(),
+    // NUEVOS: Porcentajes IGV e IPM (editables)
+    igv_porcentaje: z.union([z.string(), z.coerce.number()]).optional(),
+    ipm_porcentaje: z.union([z.string(), z.coerce.number()]).optional(),
 
-  // NUEVO: si true, devolver también el asiento contable (preview)
-  generar_asiento:    asBool.optional().default(false),
+    // % opcionales; se ignoran si el toggle respectivo está en false
+    isc_porcentaje:    z.union([z.string(), z.coerce.number()]).optional(),
+
+    // Tasa de percepción seleccionada (3.5, 5, 10) - SOLO esta, sin campo editable extra
+    tasa_percepcion: z.enum(['3.5', '5', '10']).optional(),
+
+    antidumping_usd:    z.coerce.number().min(0).optional(),
+    compensatorio_usd:  z.coerce.number().min(0).optional(),
+    sda_usd:            z.coerce.number().min(0).optional(),
+
+    generar_asiento:    asBool.optional().default(false),
 });
 
 /**
@@ -76,11 +132,11 @@ const formSchema = z.object({
  *     description: |
  *       Orden: **CIF → A/V → (ISC) → IGV+IPM → (AD/CVD) → Percepción → SDA**.
  *       - **CIF = FOB + Flete + Seguro** (automático, en USD).
- *       - **A/V** se toma automáticamente de la BD por subpartida.
- *       - **ISC**: si *Habilitar ISC* es **false**, el ISC=0 y se ignora `isc_porcentaje`.  
+ *       - **A/V** ahora es MANUAL (campo `advalorem_porcentaje`).
+ *       - **IGV/IPM**: ahora son editables (`igv_porcentaje` y `ipm_porcentaje`).
+ *       - **ISC**: si *Habilitar ISC* es **false**, el ISC=0 y se ignora `isc_porcentaje`.
  *         Si es **true**, `isc_porcentaje` se aplica a **(CIF + A/V)**; acepta **50**, **0.5** o **"50%"**.
- *       - **IGV/IPM**: si *Habilitar IGV* es **false**, IGV=0 e IPM=0.
- *       - **Percepción**: toggle propio (independiente de IGV/IPM).  
+ *       - **Percepción**: toggle propio con selector de tasa (3.5%, 5%, 10%).
  *         La base es: **(CIF + A/V + ISC) + IGV + IPM + AD/CVD**.
  *       - **Asiento contable**: si envías `generar_asiento=true`, se incluye `asiento` (preview en **USD**, no persiste).
  *     requestBody:
@@ -105,15 +161,22 @@ const formSchema = z.object({
  *               fob:      { type: number, title: "FOB (USD)",    example: 167133 }
  *               flete:    { type: number, title: "Flete (USD)",  example: 22656 }
  *               seguro:   { type: number, title: "Seguro (USD)", example: 284 }
- *               perfil_importador:
+ *               advalorem_porcentaje:
  *                 type: string
- *                 title: Perfil del importador
- *                 enum: [normal, primera_importacion, no_habido, publico, amazonia]
- *                 example: normal
+ *                 title: "Ad-Valorem (A/V) % — acepta 6, 0.06 o '6%'"
+ *                 example: "6"
  *               es_usado: { type: boolean, title: "¿Bien usado?", example: false }
  *               habilitar_igv:        { type: boolean, title: "Habilitar IGV/IPM", example: true }
  *               habilitar_isc:        { type: boolean, title: "Habilitar ISC",     example: false }
  *               habilitar_percepcion: { type: boolean, title: "Habilitar percepción", example: true }
+ *               igv_porcentaje:
+ *                 type: string
+ *                 title: "IGV % — acepta 16, 0.16 o '16%'"
+ *                 example: "16"
+ *               ipm_porcentaje:
+ *                 type: string
+ *                 title: "IPM % — acepta 2, 0.02 o '2%'"
+ *                 example: "2"
  *               isc_porcentaje:
  *                 type: string
  *                 title: ISC % sobre (CIF + A/V) — acepta 50, 0.5 o "50%"
@@ -121,6 +184,12 @@ const formSchema = z.object({
  *               percepcion_tasa:
  *                 type: string
  *                 title: Percepción IGV — acepta 3.5, 0.035 o "3.5%"
+ *                 example: "3.5"
+ *               tasa_percepcion:
+ *                 type: string
+ *                 enum: ["3.5", "5", "10"]
+ *                 title: "Tasa de percepción seleccionada"
+ *                 description: "3.5% = Normal, 5% = Bienes usados, 10% = No habido/Baja RUC/Sin RUC"
  *                 example: "3.5"
  *               antidumping_usd:   { type: number, title: "Antidumping (USD)",   example: 0 }
  *               compensatorio_usd: { type: number, title: "Compensatorio (USD)", example: 0 }
@@ -131,120 +200,222 @@ const formSchema = z.object({
  *       400: { description: Datos inválidos }
  */
 router.post('/quote-form', async (req, res) => {
-  const parsed = formSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ message: 'Datos inválidos', errors: parsed.error.issues });
-  const f = parsed.data;
+    const parsed = formSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: 'Datos inválidos', errors: parsed.error.issues });
+    const f = parsed.data;
 
-  // % (se ignoran si su toggle está en false)
-  const iscRate  = f.habilitar_isc        ? parsePercent(f.isc_porcentaje)  : undefined;
-  if (iscRate !== undefined && (iscRate < 0 || iscRate > 1)) {
-    return res.status(400).json({ message: 'isc_porcentaje debe ser un porcentaje válido (ej. 50, 0.5 o "50%").' });
-  }
-  const percRate = f.habilitar_percepcion ? parsePercent(f.percepcion_tasa) : undefined;
-  if (percRate !== undefined && (percRate < 0 || percRate > 1)) {
-    return res.status(400).json({ message: 'percepcion_tasa debe ser un porcentaje válido (ej. 3.5, 0.035 o "3.5%").' });
-  }
-
-  try {
-    const perfil = await loadRuleProfile(hs(f.subpartida));
-    const cifUsd = (f.fob ?? 0) + (f.flete ?? 0) + (f.seguro ?? 0);
-
-    const result = simulate(
-      {
-        hs10: hs(f.subpartida),
-        // fxRate: eliminado → los cálculos son en USD
-        cif: cifUsd,
-        importerProfile: f.perfil_importador ? perfilMap[f.perfil_importador] : undefined,
-        isUsed: f.es_usado,
-      },
-      perfil,
-      {
-        igvEnabled:         f.habilitar_igv,
-        iscEnabled:         f.habilitar_isc,
-        perceptionEnabled:  f.habilitar_percepcion,
-        iscRate,
-        antidumpingUsd:     f.antidumping_usd,
-        countervailingUsd:  f.compensatorio_usd,
-        perceptionRate:     percRate,
-        sdaUsd:             f.sda_usd,
-      }
-    );
-
-    // Si NO piden asiento, responder solo simulación (en USD)
-    if (!f.generar_asiento) {
-      return res.json(result);
+    // NUEVO: Parsear A/V manual
+    const avRate = parsePercent(f.advalorem_porcentaje);
+    if (avRate !== undefined && (avRate < 0 || avRate > 1)) {
+        return res.status(400).json({ message: 'advalorem_porcentaje debe ser un porcentaje válido (ej. 6, 0.06 o "6%").' });
     }
 
-    // ───────────────────────────────────────────
-    // Asiento contable (preview) en USD usando TU BD
-    // ───────────────────────────────────────────
-    const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+    // NUEVO: Parsear IGV e IPM
+    let igvRate = 0.16; // default 16%
+    let ipmRate = 0.02; // default 2%
 
-    // 1) Cuenta de bienes por subpartida (subpartida.cuenta_id → cuenta_contable)
-    const bienesRes = await dbQuery<{ codigo: string; nombre: string }>(
-      `
-      SELECT c.codigo, c.nombre
-        FROM miaff.subpartida s
-        JOIN miaff.cuenta_contable c ON c.id = s.cuenta_id
-       WHERE s.hs10 = $1
-       LIMIT 1
-      `,
-      [hs(f.subpartida)]
-    );
-    const cuentaBienes = bienesRes.rows[0] ?? { codigo: '601', nombre: 'Mercaderías' };
+    if (f.habilitar_igv && f.igv_porcentaje) {
+        const parsed = parsePercent(f.igv_porcentaje);
+        if (parsed === undefined || parsed < 0 || parsed > 1) {
+            return res.status(400).json({ message: 'igv_porcentaje debe ser un porcentaje válido (ej. 16, 0.16 o "16%").' });
+        }
+        igvRate = parsed;
+    }
 
-    // 2) Cuentas estándar (jalar nombres desde BD)
-    const standarCodes = ['4015','4012','40111','40113','609','421'];
-    const stdRes = await dbQuery<{ codigo: string; nombre: string }>(
-      `SELECT codigo, nombre FROM miaff.cuenta_contable WHERE codigo = ANY($1::text[])`,
-      [standarCodes]
-    );
-    const mapStd = new Map(stdRes.rows.map(r => [r.codigo, r.nombre]));
-    const nombre = (cod: string, def: string) => mapStd.get(cod) ?? def;
+    if (f.habilitar_igv && f.ipm_porcentaje) {
+        const parsed = parsePercent(f.ipm_porcentaje);
+        if (parsed === undefined || parsed < 0 || parsed > 1) {
+            return res.status(400).json({ message: 'ipm_porcentaje debe ser un porcentaje válido (ej. 2, 0.02 o "2%").' });
+        }
+        ipmRate = parsed;
+    }
 
-    // 3) Montos (USD) desde la simulación
-    // Se asume que 'result' ya expresa montos en USD al no proveer fxRate
-    const cifUsdx     = r2(cifUsd);
-    const avAmtUsd    = r2(result.arancel?.amount || 0);
-    const iscAmtUsd   = r2(result.isc?.total || 0);
-    const igvTotUsd   = r2((result.igv?.igv16 || 0) + (result.igv?.ipm2 || 0)); // IGV+IPM juntos en 40111
-    const remediosUsd = r2(result.trade_remedies?.total || 0);
-    const sdaAmtUsd   = r2(result.sda?.amount || 0);
-    const costosVinc  = r2(remediosUsd + sdaAmtUsd);                              // 609
-    const percepUsd   = r2(result.percepcion?.amount || 0);
+    // Parsear ISC
+    const iscRate = f.habilitar_isc ? parsePercent(f.isc_porcentaje) : undefined;
+    if (iscRate !== undefined && (iscRate < 0 || iscRate > 1)) {
+        return res.status(400).json({ message: 'isc_porcentaje debe ser un porcentaje válido (ej. 50, 0.5 o "50%").' });
+    }
 
-    // 4) Líneas (todas en DEBE excepto 421)
-    const lineas: Array<{ cuenta: string; denominacion: string; debe: number; haber: number }> = [
-      { cuenta: cuentaBienes.codigo, denominacion: cuentaBienes.nombre, debe: cifUsdx,    haber: 0 },
-      { cuenta: '4015',  denominacion: nombre('4015','Derechos aduaneros'),               debe: avAmtUsd,   haber: 0 },
-      { cuenta: '4012',  denominacion: nombre('4012','Impuesto Selectivo al Consumo'),    debe: iscAmtUsd,  haber: 0 },
-      { cuenta: '40111', denominacion: nombre('40111','IGV – Cuenta propia'),             debe: igvTotUsd,  haber: 0 },
-      { cuenta: '609',   denominacion: nombre('609','Costos vinculados con las compras'), debe: costosVinc, haber: 0 },
-      { cuenta: '40113', denominacion: nombre('40113','IGV – Régimen de percepciones'),   debe: percepUsd,  haber: 0 },
-    ];
+    // Parsear Percepción - usar la tasa del selector
+    let percRate: number | undefined = undefined;
+    if (f.habilitar_percepcion && f.tasa_percepcion) {
+        const tasa = parseFloat(f.tasa_percepcion) / 100; // 3.5 -> 0.035
+        if (tasa >= 0 && tasa <= 1) {
+            percRate = tasa;
+        }
+    }
 
-    // 5) Totales y contrapartida 421
-    const debeTotal  = r2(lineas.reduce((s, l) => s + l.debe, 0));
-    const haberTotal = debeTotal;
-    lineas.push({
-      cuenta: '421',
-      denominacion: nombre('421','Facturas, boletas y otros comprobantes por pagar'),
-      debe: 0,
-      haber: haberTotal
-    });
+    try {
+        const perfil = await loadRuleProfile(hs(f.subpartida));
+        const cifUsd = (f.fob ?? 0) + (f.flete ?? 0) + (f.seguro ?? 0);
 
-    const asiento = {
-      moneda: 'USD',
-      lineas,
-      debe_total: debeTotal,
-      haber_total: haberTotal,
-    };
+        // Obtener A/V de BD primero
+        const avRes = await dbQuery<{ tasa: number }>(
+            `SELECT tasa FROM miaff.ad_valorem WHERE hs10 = $1 LIMIT 1`,
+            [hs(f.subpartida)]
+        );
 
-    return res.json({ ...result, asiento });
-  } catch (err: any) {
-    console.error(err);
-    return res.status(400).json({ message: err?.message ?? 'No se pudo simular' });
-  }
+        // Si existe en BD, usar ese valor (no editable desde frontend)
+        // Si no existe, usar el valor manual del usuario
+        let avRate: number;
+        let avFromDB = false;
+
+        if (avRes.rows.length > 0 && avRes.rows[0].tasa !== null) {
+            avRate = avRes.rows[0].tasa; // Ya viene como decimal (ej. 0.06)
+            avFromDB = true;
+        } else {
+            // No está en BD, usar valor manual
+            const manualAV = parsePercent(f.advalorem_porcentaje);
+            if (manualAV === undefined || manualAV < 0 || manualAV > 1) {
+                return res.status(400).json({ message: 'advalorem_porcentaje debe ser un porcentaje válido (ej. 6, 0.06 o "6%").' });
+            }
+            avRate = manualAV;
+            avFromDB = false;
+        }
+
+        // Calcular A/V
+        const avAmountUsd = cifUsd * avRate;
+
+        // Base imponible para ISC = CIF + A/V
+        const baseISC = cifUsd + avAmountUsd;
+        const iscAmountUsd = iscRate !== undefined && f.habilitar_isc ? baseISC * iscRate : 0;
+
+        // IGV e IPM
+        const baseIGV = baseISC + iscAmountUsd;
+        const igvAmountUsd = f.habilitar_igv ? baseIGV * igvRate : 0;
+        const ipmAmountUsd = f.habilitar_igv ? baseIGV * ipmRate : 0;
+
+        // AD/CVD
+        const antidumpingUsd = f.antidumping_usd || 0;
+        const countervailingUsd = f.compensatorio_usd || 0;
+        const tradeRemediesUsd = antidumpingUsd + countervailingUsd;
+
+        // Base para percepción = CIF + A/V + ISC + IGV + IPM + AD/CVD
+        const basePerc = baseIGV + igvAmountUsd + ipmAmountUsd + tradeRemediesUsd;
+        const percAmountUsd = percRate !== undefined && f.habilitar_percepcion ? basePerc * percRate : 0;
+
+        // SDA
+        const sdaUsd = f.sda_usd || 0;
+
+        // Total deuda
+        const totalDeudaUsd = avAmountUsd + iscAmountUsd + igvAmountUsd + ipmAmountUsd +
+            tradeRemediesUsd + percAmountUsd + sdaUsd;
+
+        const result = {
+            subpartida: f.subpartida,
+            cif_usd: cifUsd,
+            arancel: {
+                rate: avRate,
+                amount: avAmountUsd,
+                from_db: avFromDB, // Indicador de si vino de BD o es manual
+            },
+            isc: {
+                enabled: f.habilitar_isc,
+                rate: iscRate,
+                base: baseISC,
+                total: iscAmountUsd,
+            },
+            igv: {
+                enabled: f.habilitar_igv,
+                igv_rate: igvRate,
+                ipm_rate: ipmRate,
+                igv16: igvAmountUsd,
+                ipm2: ipmAmountUsd,
+                base: baseIGV,
+                total: igvAmountUsd + ipmAmountUsd,
+            },
+            trade_remedies: {
+                antidumping: antidumpingUsd,
+                countervailing: countervailingUsd,
+                total: tradeRemediesUsd,
+            },
+            percepcion: {
+                enabled: f.habilitar_percepcion,
+                rate: percRate,
+                tasa_seleccionada: f.tasa_percepcion, // 3.5, 5 o 10
+                base: basePerc,
+                amount: percAmountUsd,
+            },
+            sda: {
+                amount: sdaUsd,
+            },
+            total_deuda_usd: totalDeudaUsd,
+        };
+
+        // Si NO piden asiento, responder solo simulación (en USD)
+        if (!f.generar_asiento) {
+            return res.json(result);
+        }
+
+        // ───────────────────────────────────────────
+        // Asiento contable (preview) en USD usando TU BD
+        // ───────────────────────────────────────────
+        const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+        // 1) Cuenta de bienes por subpartida (subpartida.cuenta_id → cuenta_contable)
+        const bienesRes = await dbQuery<{ codigo: string; nombre: string }>(
+            `
+                SELECT c.codigo, c.nombre
+                FROM miaff.subpartida s
+                         JOIN miaff.cuenta_contable c ON c.id = s.cuenta_id
+                WHERE s.hs10 = $1
+                    LIMIT 1
+            `,
+            [hs(f.subpartida)]
+        );
+        const cuentaBienes = bienesRes.rows[0] ?? { codigo: '601', nombre: 'Mercaderías' };
+
+        // 2) Cuentas estándar (jalar nombres desde BD)
+        const standarCodes = ['4015','4012','40111','40113','609','421'];
+        const stdRes = await dbQuery<{ codigo: string; nombre: string }>(
+            `SELECT codigo, nombre FROM miaff.cuenta_contable WHERE codigo = ANY($1::text[])`,
+            [standarCodes]
+        );
+        const mapStd = new Map(stdRes.rows.map(r => [r.codigo, r.nombre]));
+        const nombre = (cod: string, def: string) => mapStd.get(cod) ?? def;
+
+        // 3) Montos (USD) desde la simulación
+        const cifUsdx     = r2(cifUsd);
+        const avAmtUsd    = r2(avAmountUsd);
+        const iscAmtUsd   = r2(iscAmountUsd);
+        const igvTotUsd   = r2(igvAmountUsd + ipmAmountUsd); // IGV+IPM juntos en 40111
+        const remediosUsd = r2(tradeRemediesUsd);
+        const sdaAmtUsd   = r2(sdaUsd);
+        const costosVinc  = r2(remediosUsd + sdaAmtUsd);     // 609
+        const percepUsd   = r2(percAmountUsd);
+
+        // 4) Líneas (todas en DEBE excepto 421)
+        const lineas: Array<{ cuenta: string; denominacion: string; debe: number; haber: number }> = [
+            { cuenta: cuentaBienes.codigo, denominacion: cuentaBienes.nombre, debe: cifUsdx,    haber: 0 },
+            { cuenta: '4015',  denominacion: nombre('4015','Derechos aduaneros'),               debe: avAmtUsd,   haber: 0 },
+            { cuenta: '4012',  denominacion: nombre('4012','Impuesto Selectivo al Consumo'),    debe: iscAmtUsd,  haber: 0 },
+            { cuenta: '40111', denominacion: nombre('40111','IGV – Cuenta propia'),             debe: igvTotUsd,  haber: 0 },
+            { cuenta: '609',   denominacion: nombre('609','Costos vinculados con las compras'), debe: costosVinc, haber: 0 },
+            { cuenta: '40113', denominacion: nombre('40113','IGV – Régimen de percepciones'),   debe: percepUsd,  haber: 0 },
+        ];
+
+        // 5) Totales y contrapartida 421
+        const debeTotal  = r2(lineas.reduce((s, l) => s + l.debe, 0));
+        const haberTotal = debeTotal;
+        lineas.push({
+            cuenta: '421',
+            denominacion: nombre('421','Facturas, boletas y otros comprobantes por pagar'),
+            debe: 0,
+            haber: haberTotal
+        });
+
+        const asiento = {
+            moneda: 'USD',
+            lineas,
+            debe_total: debeTotal,
+            haber_total: haberTotal,
+        };
+
+        return res.json({ ...result, asiento });
+    } catch (err: any) {
+        console.error(err);
+        return res.status(400).json({ message: err?.message ?? 'No se pudo simular' });
+    }
 });
 
 export default router;

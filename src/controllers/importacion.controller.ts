@@ -166,4 +166,31 @@ export class ImportacionController {
             res.status(500).json({ message: 'Error al eliminar la importación' });
         }
     }
+    /**
+     * GET /api/importaciones/:id/asiento-contable
+     * Genera y devuelve el asiento contable para una importación
+     */
+    static async obtenerAsientoContable(req: Request, res: Response) {
+        const { id } = req.params;
+        const numericId = parseInt(id, 10);
+
+        if (isNaN(numericId)) {
+            return res.status(400).json({ message: 'El ID proporcionado no es válido' });
+        }
+
+        const user = (req as any).user as JwtUser;
+
+        try {
+            const asiento = await ImportacionService.generarAsientoContable(numericId, user.sub);
+
+            if (!asiento) {
+                return res.status(404).json({ message: 'No se pudo generar el asiento para la importación solicitada.' });
+            }
+
+            res.json(asiento);
+        } catch (error) {
+            console.error('Error al generar asiento contable:', error);
+            res.status(500).json({ message: 'Error al generar el asiento contable' });
+        }
+    }
 }

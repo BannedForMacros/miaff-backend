@@ -642,6 +642,63 @@ router.get('/analysis/:caso_id', AnalisisController.obtenerAnalisisCompleto);
 
 /**
  * @swagger
+ * /api/rentability/asiento-consolidado/{caso_id}:
+ *   get:
+ *     tags:
+ *       - Análisis de Rentabilidad
+ *     summary: Obtiene el asiento contable consolidado con toggle de moneda
+ *     description: |
+ *       Genera un asiento contable consolidado con conversión dinámica de moneda.
+ *       - ✅ Usa tipo de cambio en tiempo real desde /api/exchange-rate
+ *       - ✅ Soporta USD y PEN
+ *     parameters:
+ *       - in: path
+ *         name: caso_id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         example: 1
+ *       - in: query
+ *         name: moneda
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: ['USD', 'PEN']
+ *           default: 'USD'
+ *         description: Moneda base para mostrar el asiento
+ *         example: 'USD'
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Asiento consolidado generado exitosamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     moneda:
+ *                       type: string
+ *                       example: "USD"
+ *                     tipo_cambio:
+ *                       type: number
+ *                       example: 3.39
+ *                     totalDebe:
+ *                       type: number
+ *                     totalHaber:
+ *                       type: number
+ *       400:
+ *         $ref: '#/components/responses/ValidationError'
+ */
+router.get('/asiento-consolidado/:caso_id', AnalisisController.obtenerAsientoContableConsolidado);
+
+/**
+ * @swagger
  * /api/rentability/ratios/{caso_id}:
  *   get:
  *     tags:

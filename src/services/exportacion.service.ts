@@ -1,76 +1,137 @@
+// En Exportacion.service.ts
 import { dbQuery } from '../db';
-import { CrearExportacionInput, ExportacionDB } from '../types/exportacion.types';
+import { CrearExportacionInput, ExportacionDB, ActualizarExportacionInput } from '../types/exportacion.types';
 
 export class ExportacionService {
 
-  static async crear(userId: string, data: CrearExportacionInput): Promise<ExportacionDB> {
-    const {
-      caso_estudio_id,
-      es_venta_nacional,
-      incoterm,
-      descripcion_venta,
-      pais_origen,      // <-- AÑADIDO
-      pais_destino,     // <-- AÑADIDO
-      valor_venta,
-      moneda,
-      fecha_operacion
-    } = data;
+    static async crear(userId: string, data: CrearExportacionInput): Promise<ExportacionDB> {
+        const {
+            caso_estudio_id,
+            es_venta_nacional,
+            incoterm,
+            descripcion_venta,
+            pais_origen,
+            pais_destino,
+            valor_venta,
+            moneda,
+            fecha_operacion
+        } = data;
 
-    // Se añaden las nuevas columnas a la consulta SQL
-    const sql = `
-      INSERT INTO miaff.exportaciones (
-        user_id, caso_estudio_id, es_venta_nacional, incoterm, 
-        descripcion_venta, pais_origen, pais_destino, valor_venta, moneda, fecha_operacion
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      RETURNING *;
-    `;
-    
-    // Se añaden los nuevos parámetros en el orden correcto
-    const params = [
-      userId,
-      caso_estudio_id,
-      es_venta_nacional,
-      incoterm,
-      descripcion_venta,
-      pais_origen,
-      pais_destino,
-      valor_venta,
-      moneda,
-      fecha_operacion || new Date().toISOString().split('T')[0]
-    ];
+        const sql = `
+            INSERT INTO miaff.exportaciones (
+                user_id, caso_estudio_id, es_venta_nacional, incoterm,
+                descripcion_venta, pais_origen, pais_destino, valor_venta,
+                moneda, fecha_operacion, activo
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                RETURNING *;
+        `;
 
-    // ✅ CORRECCIÓN: Se especifica el tipo <ExportacionDB> que debe devolver la consulta.
-    const { rows } = await dbQuery<ExportacionDB>(sql, params);
-    return rows[0];
-  }
+        const params = [
+            userId,
+            caso_estudio_id,
+            es_venta_nacional,
+            incoterm,
+            descripcion_venta,
+            pais_origen,
+            pais_destino,
+            valor_venta,
+            moneda,
+            fecha_operacion || new Date().toISOString().split('T')[0],
+            true // activo
+        ];
 
-  // Las funciones listar y obtenerPorId usan "SELECT *", por lo que no necesitan cambios.
-  // Automáticamente incluirán las nuevas columnas.
-  static async listar(userId: string, casoEstudioId?: number): Promise<ExportacionDB[]> {
-    let sql = `
-      SELECT * FROM miaff.exportaciones
-      WHERE user_id = $1
-    `;
-    const params: any[] = [userId];
-
-    if (casoEstudioId) {
-      sql += ` AND caso_estudio_id = $2`;
-      params.push(casoEstudioId);
+        const { rows } = await dbQuery<ExportacionDB>(sql, params);
+        return rows[0];
     }
 
-    sql += ` ORDER BY fecha_operacion DESC, created_at DESC;`;
+    static async listar(userId: string, casoEstudioId?: number): Promise<ExportacionDB[]> {
+        let sql = `
+      SELECT * FROM miaff.exportaciones
+      WHERE user_id = $1 AND activo = true
+    `;
+        const params: any[] = [userId];
 
-    // ✅ CORRECCIÓN: Se especifica el tipo <ExportacionDB> que debe devolver la consulta.
-    const { rows } = await dbQuery<ExportacionDB>(sql, params);
-    return rows;
-  }
+        if (casoEstudioId) {
+            sql += ` AND caso_estudio_id = $${params.length + 1}`;
+            params.push(casoEstudioId);
+        }
 
-  static async obtenerPorId(id: number, userId: string): Promise<ExportacionDB | null> {
-    // ✅ CORRECCIÓN: Se especifica el tipo <ExportacionDB> que debe devolver la consulta.
-    const { rows } = await dbQuery<ExportacionDB>(
-      'SELECT * FROM miaff.exportaciones WHERE id = $1 AND user_id = $2',
-      [id, userId]
-    );
-    return rows.length > 0 ? rows[0] : null;
-  }
+        sql += ` ORDER BY fecha_operacion DESC, created_at DESC;`;
+
+        const { rows } = await dbQuery<ExportacionDB>(sql, params);
+        return rows;
+    }
+
+    static async obtenerPorId(id: number, userId: string): Promise<ExportacionDB | null> {
+        const { rows } = await dbQuery<ExportacionDB>(
+            'SELECT * FROM miaff.exportaciones WHERE id = $1 AND user_id = $2 AND activo = true',
+            [id, userId]
+        );
+        return rows.length > 0 ? rows[0] : null;
+    }
+
+    static async actualizar(id: number, userId: string, data: Partial<CrearExportacionInput>): Promise<ExportacionDB | null> {
+        // Verificar que la exportación existe y pertenece al usuario
+        const existente = await this.obtenerPorId(id, userId);
+        if (!existente) {
+            return null;
+        }
+
+        const camposPermitidos = [
+            'caso_estudio_id', 'es_venta_nacional', 'incoterm', 'descripcion_venta',
+            'pais_origen', 'pais_destino', 'valor_venta', 'moneda', 'fecha_operacion'
+        ];
+
+        const updates: string[] = [];
+        const values: any[] = [];
+        let paramCount = 1;
+
+        camposPermitidos.forEach(campo => {
+            if (data[campo as keyof CrearExportacionInput] !== undefined) {
+                updates.push(`${campo} = $${paramCount}`);
+                values.push(data[campo as keyof CrearExportacionInput]);
+                paramCount++;
+            }
+        });
+
+        if (updates.length === 0) {
+            throw new Error('No se proporcionaron campos para actualizar');
+        }
+
+        // Agregar updated_at
+        updates.push('updated_at = CURRENT_TIMESTAMP');
+
+        values.push(id, userId);
+
+        const sql = `
+      UPDATE miaff.exportaciones 
+      SET ${updates.join(', ')}
+      WHERE id = $${paramCount} AND user_id = $${paramCount + 1} AND activo = true
+      RETURNING *;
+    `;
+
+        const { rows } = await dbQuery<ExportacionDB>(sql, values);
+        return rows.length > 0 ? rows[0] : null;
+    }
+
+    static async eliminar(id: number, userId: string): Promise<boolean> {
+        const { rows } = await dbQuery(
+            `UPDATE miaff.exportaciones 
+       SET activo = false, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 AND user_id = $2 AND activo = true
+       RETURNING id`,
+            [id, userId]
+        );
+        return rows.length > 0;
+    }
+
+    // Verificar que el usuario tiene acceso al caso de estudio
+    static async verificarCasoEstudioUsuario(caso_estudio_id: number, user_id: string): Promise<boolean> {
+        const { rows } = await dbQuery(
+            `SELECT id FROM miaff.casos_de_estudio
+       WHERE id = $1 AND user_id = $2 AND estado != 'eliminado'`,
+            [caso_estudio_id, user_id]
+        );
+        return rows.length > 0;
+    }
 }

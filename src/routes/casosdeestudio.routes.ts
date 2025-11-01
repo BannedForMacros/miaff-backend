@@ -155,6 +155,184 @@ router.post('/', requireAuth, async (req, res) => {
 
 /**
  * @openapi
+ * /api/casos-de-estudio/abiertos:
+ *   get:
+ *     tags: [Casos de Estudio]
+ *     summary: Obtiene la lista de casos de estudio con estado "abierto" del usuario autenticado.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       '200':
+ *         description: OK
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/CasoDeEstudio'
+ */
+router.get('/abiertos', requireAuth, async (req, res) => {
+    const user = (req as any).user as JwtUser;
+    try {
+        const { rows } = await dbQuery(
+            `SELECT * FROM miaff.casos_de_estudio
+             WHERE user_id = $1 AND estado = 'abierto'
+             ORDER BY created_at DESC`,
+            [user.sub]
+        );
+        res.json(rows);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Error al obtener los casos de estudio abiertos' });
+    }
+});
+
+
+/**
+ * @openapi
+ * /api/casos-de-estudio/{id}:
+ *   get:
+ *     tags: [Casos de Estudio]
+ *     summary: Obtiene un caso de estudio específico por ID.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: ID del caso de estudio
+ *     responses:
+ *       '200':
+ *         description: OK
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/CasoDeEstudio'
+ *       '404':
+ *         description: Caso no encontrado
+ */
+router.get('/:id', requireAuth, async (req, res) => {
+    const { id } = req.params;
+    const numericId = parseInt(id, 10);
+
+    if (isNaN(numericId)) {
+        return res.status(400).json({ message: 'El ID proporcionado no es un número válido.' });
+    }
+
+    const user = (req as any).user as JwtUser;
+
+    try {
+        const { rows } = await dbQuery(
+            `SELECT * FROM miaff.casos_de_estudio 
+             WHERE id = $1 AND user_id = $2 AND estado != 'eliminado'`,
+            [numericId, user.sub]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({
+                message: 'Caso de estudio no encontrado o no autorizado.'
+            });
+        }
+
+        res.json(rows[0]);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Error al obtener el caso de estudio' });
+    }
+});
+
+
+/**
+ * @openapi
+ * /api/casos-de-estudio/{id}/cerrar:
+ *   patch:
+ *     tags: [Casos de Estudio]
+ *     summary: Cierra un caso de estudio específico (cambia estado a "cerrado").
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: ID del caso de estudio a cerrar
+ *     responses:
+ *       '200':
+ *         description: Caso cerrado exitosamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/CasoDeEstudio'
+ *       '404':
+ *         description: Caso no encontrado o no autorizado
+ *       '400':
+ *         description: El caso ya está cerrado o eliminado
+ */
+router.patch('/:id/cerrar', requireAuth, async (req, res) => {
+
+    const { id } = req.params;
+
+    // Validar que el ID sea un número válido
+    const numericId = parseInt(id, 10);
+    if (isNaN(numericId)) {
+        return res.status(400).json({ message: 'El ID proporcionado no es un número válido.' });
+    }
+
+    const user = (req as any).user as JwtUser;
+
+    try {
+        // Verificar que el caso existe, pertenece al usuario y está abierto
+        const { rows: checkRows } = await dbQuery(
+            `SELECT id, estado FROM miaff.casos_de_estudio
+             WHERE id = $1 AND user_id = $2`,
+            [numericId, user.sub]
+        );
+
+        if (checkRows.length === 0) {
+            return res.status(404).json({
+                message: 'Caso de estudio no encontrado o no autorizado.'
+            });
+        }
+
+        const casoActual = checkRows[0];
+
+        // Verificar que no esté ya cerrado o eliminado
+        if (casoActual.estado === 'cerrado') {
+            return res.status(400).json({
+                message: 'El caso de estudio ya está cerrado.'
+            });
+        }
+
+        if (casoActual.estado === 'eliminado') {
+            return res.status(400).json({
+                message: 'No se puede cerrar un caso eliminado.'
+            });
+        }
+
+        // Cerrar el caso
+        const { rows } = await dbQuery(
+            `UPDATE miaff.casos_de_estudio
+             SET estado = 'cerrado', updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1 AND user_id = $2
+             RETURNING *`,
+            [numericId, user.sub]
+        );
+
+        res.json({
+            message: 'Caso de estudio cerrado exitosamente',
+            caso: rows[0]
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Error al cerrar el caso de estudio' });
+    }
+});
+
+/**
+ * @openapi
  * /api/casos-de-estudio/{id}:
  *   put:
  *     tags: [Casos de Estudio]
