@@ -1,7 +1,17 @@
+// importacion.types.ts
+
 export interface JwtUser {
     sub: string;
     email: string;
     roles?: string[];
+}
+
+// NUEVO
+export interface TipoMercanciaImportacion {
+    id: number;
+    nombre: string;
+    cuenta_contable: string;
+    descripcion: string;
 }
 
 export interface ImportacionCalculada {
@@ -18,6 +28,7 @@ export interface ImportacionCalculada {
 
 export interface CreateImportacionData {
     caso_estudio_id: number;
+    tipo_mercancia_id: number; // NUEVO
     subpartida_hs10: string;
     descripcion_mercancia: string;
     moneda: 'USD' | 'PEN';
@@ -38,6 +49,7 @@ export interface CreateImportacionData {
 
 export interface UpdateImportacionData {
     caso_estudio_id?: number;
+    tipo_mercancia_id?: number; // NUEVO
     subpartida_hs10?: string;
     descripcion_mercancia?: string;
     moneda?: 'USD' | 'PEN';
@@ -85,6 +97,7 @@ export interface ImportacionDB {
     id: number;
     caso_estudio_id: number;
     user_id: string;
+    tipo_mercancia_id?: number; // NUEVO
     subpartida_hs10: string;
     descripcion_mercancia: string;
     moneda: 'USD' | 'PEN';
@@ -109,11 +122,13 @@ export interface ImportacionDB {
     dta_total: number;
     asiento_contable_json: any;
     fecha_operacion: string;
-    activo: number; // ✅ NUEVO: 1 = activo, 0 = eliminado
+    activo: number;
     created_at: Date;
     updated_at: Date;
     nombre_caso?: string;
     subpartida_descripcion?: string;
+    tipo_mercancia_nombre?: string; // NUEVO
+    tipo_mercancia_cuenta?: string; // NUEVO
 }
 
 export interface TributoDB {

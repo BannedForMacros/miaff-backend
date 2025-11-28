@@ -189,27 +189,61 @@ export class GastoController {
     }
   }
 
-  static async generarAsientoContable(req: Request, res: Response) {
-    const user = (req as any).user as JwtUser;
-    const casoEstudioId = parseInt(req.query.caso_estudio_id as string, 10);
-    
-    if (isNaN(casoEstudioId)) {
-      return res.status(400).json({ 
-        message: 'El ID del caso de estudio es requerido.' 
-      });
+    static async generarAsientoContable(req: Request, res: Response) {
+        const user = (req as any).user as JwtUser;
+        const casoEstudioId = parseInt(req.query.caso_estudio_id as string, 10);
+        const tipoGasto = req.query.tipo_gasto as string | undefined; // NUEVO
+
+        if (isNaN(casoEstudioId)) {
+            return res.status(400).json({
+                message: 'El ID del caso de estudio es requerido.'
+            });
+        }
+
+        // Validar tipo_gasto si viene
+        if (tipoGasto && !['OPERATIVO', 'ADMINISTRATIVO', 'VENTA', 'FINANCIERO'].includes(tipoGasto)) {
+            return res.status(400).json({
+                message: 'tipo_gasto debe ser OPERATIVO, ADMINISTRATIVO, VENTA o FINANCIERO'
+            });
+        }
+
+        try {
+            const asiento = await GastoService.generarAsientoContable(
+                user.sub,
+                casoEstudioId,
+                tipoGasto // NUEVO - puede ser undefined
+            );
+            res.status(200).json(asiento);
+        } catch (error) {
+            console.error('Error al generar asiento contable:', error);
+            res.status(500).json({ message: 'Error interno del servidor' });
+        }
     }
-    
-    try {
-      const asiento = await GastoService.generarAsientoContable(
-        user.sub, 
-        casoEstudioId
-      );
-      res.status(200).json(asiento);
-    } catch (error) {
-      console.error('Error al generar asiento contable:', error);
-      res.status(500).json({ message: 'Error interno del servidor' });
+
+    static async generarAsientoContablePorGasto(req: Request, res: Response) {
+        const user = (req as any).user as JwtUser;
+        const gastoId = parseInt(req.params.id, 10);
+
+        if (isNaN(gastoId)) {
+            return res.status(400).json({
+                message: 'El ID del gasto es inválido.'
+            });
+        }
+
+        try {
+            const asiento = await GastoService.generarAsientoContablePorGasto(
+                user.sub,
+                gastoId
+            );
+            res.status(200).json(asiento);
+        } catch (error: any) {
+            console.error('Error al generar asiento contable del gasto:', error);
+            if (error.message === 'Gasto no encontrado') {
+                return res.status(404).json({ message: error.message });
+            }
+            res.status(500).json({ message: 'Error interno del servidor' });
+        }
     }
-  }
 
   static async obtenerResumenPorTipo(req: Request, res: Response) {
     const user = (req as any).user as JwtUser;

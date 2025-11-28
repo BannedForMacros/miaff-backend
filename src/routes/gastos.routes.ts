@@ -47,6 +47,10 @@ router.use(requireAuth);
  *         calcula_igv:
  *           type: boolean
  *           example: false
+ *         igv_opcional:
+ *           type: boolean
+ *           description: Indica si el usuario puede decidir si aplica IGV o no
+ *           example: true
  *
  *     CrearGastoInput:
  *       type: object
@@ -80,6 +84,11 @@ router.use(requireAuth);
  *           type: string
  *           enum: [USD, PEN]
  *           example: "PEN"
+ *         incluye_igv:
+ *           type: boolean
+ *           nullable: true
+ *           description: Solo aplica si la clasificación tiene igv_opcional=true. Indica si el monto incluye IGV.
+ *           example: true
  *
  *     DatosFinancierosResponse:
  *       type: object
@@ -568,6 +577,96 @@ router.get('/tributos', GastoController.calcularTributos);
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.get('/asiento-contable', GastoController.generarAsientoContable);
+
+// Agregar después de la ruta GET /api/gastos/asiento-contable (antes de resumen-por-tipo)
+
+/**
+ * @openapi
+ * /api/gastos/{id}/asiento-contable:
+ *   get:
+ *     tags:
+ *       - Gastos
+ *     summary: Genera el asiento contable de un gasto específico
+ *     description: >
+ *       Genera automáticamente el asiento contable individual para un gasto activo.
+ *
+ *       **Para Remuneraciones (621.x):**
+ *       - DEBE: Cuenta de gasto (621.x) + ESSALUD (627.x)
+ *       - HABER: ESSALUD por pagar (4031), ONP/AFP (4032/407), Remuneraciones netas (411)
+ *
+ *       **Para Gastos con IGV:**
+ *       - DEBE: Cuenta de gasto + IGV (40111)
+ *       - HABER: Facturas por pagar (4211)
+ *
+ *       **Para Gastos Financieros (671.x):**
+ *       - DEBE: Cuenta de gasto
+ *       - HABER: Caja y bancos (101)
+ *
+ *       El asiento está balanceado (Debe = Haber) y utiliza monto_base y monto_igv
+ *       almacenados en la base de datos para precisión.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: ID del gasto
+ *         example: 15
+ *     responses:
+ *       '200':
+ *         description: Asiento contable generado exitosamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AsientoContableCompleto'
+ *             example:
+ *               fecha: "2025-11-23"
+ *               descripcion: "Asiento del gasto: Transporte de mercadería al puerto"
+ *               detalles:
+ *                 - codigo_cuenta: "631.1"
+ *                   denominacion: "Transporte, correos y gastos de viaje operativo"
+ *                   debe: 1694.92
+ *                   haber: 0
+ *                 - codigo_cuenta: "40111"
+ *                   denominacion: "IGV - Cuenta propia"
+ *                   debe: 305.08
+ *                   haber: 0
+ *                 - codigo_cuenta: "4211"
+ *                   denominacion: "Facturas, boletas y otros comprobantes por pagar"
+ *                   debe: 0
+ *                   haber: 2000
+ *               total_debe: 2000
+ *               total_haber: 2000
+ *       '400':
+ *         description: ID de gasto inválido
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       '401':
+ *         description: No autorizado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       '404':
+ *         description: Gasto no encontrado, no pertenece al usuario o está inactivo
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *             example:
+ *               message: "Gasto no encontrado"
+ *       '500':
+ *         description: Error interno del servidor
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get('/:id/asiento-contable', GastoController.generarAsientoContablePorGasto);
 
 // ==================== RESÚMENES Y ANÁLISIS ====================
 

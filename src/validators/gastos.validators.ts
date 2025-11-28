@@ -17,6 +17,7 @@ export const crearGastoSchema = z.object({
   
   es_remuneracion: z.boolean().optional().default(false),
   tipo_pension: z.enum(['ONP', 'AFP']).nullable().optional(),
+  incluye_igv: z.boolean().optional().nullable(),
 }).refine((data) => {
   if (data.es_remuneracion && !data.tipo_pension) {
     return false;
@@ -44,6 +45,8 @@ export const actualizarGastoSchema = z.object({
     es_remuneracion: z.boolean().optional(),
 
     tipo_pension: z.enum(['ONP', 'AFP']).nullable().optional(),
+
+    incluye_igv: z.boolean().optional().nullable(),
 
 }).refine((data) => {
     // Si 'es_remuneracion' se envía como true, 'tipo_pension' no debe ser nulo o indefinido

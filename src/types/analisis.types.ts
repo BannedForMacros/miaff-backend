@@ -1,9 +1,12 @@
-// types/analisis.types.ts
+// types/analisis.types.ts - VERSIÓN CORREGIDA SIN tipo_cambio
 
 export interface ImportacionDetalle {
     id: number;
     subpartida_hs10: string;
     descripcion_mercancia: string;
+    tipo_mercancia_id: number;
+    tipo_mercancia_cuenta: string;
+    tipo_mercancia_nombre: string;
     valor_fob: number;
     valor_flete: number;
     valor_seguro: number;
@@ -13,7 +16,11 @@ export interface ImportacionDetalle {
     monto_igv: number;
     monto_ipm: number;
     monto_percepcion: number;
+    antidumping_ingresado: number;
+    compensatorio_ingresado: number;
+    sda_ingresado: number;
     dta_total: number;
+    moneda: 'USD' | 'PEN'; // Moneda original
     fecha_operacion: Date;
     tributos?: ImportacionTributo[];
 }
@@ -29,10 +36,15 @@ export interface ImportacionTributo {
 export interface ExportacionDetalle {
     id: number;
     es_venta_nacional: boolean;
+    tipo_producto_id: number;
+    tipo_producto_nombre: string;
+    tipo_producto_cuenta: string;
     incoterm: string | null;
     descripcion_venta: string;
-    valor_venta: number;
-    moneda: string;
+    valor_venta: number; // Valor ORIGINAL en su moneda
+    monto_base: number; // Base sin IGV en moneda original
+    monto_igv: number; // IGV en moneda original
+    moneda: 'USD' | 'PEN'; // Moneda original
     fecha_operacion: Date;
     pais_origen: string | null;
     pais_destino: string | null;
@@ -44,8 +56,10 @@ export interface GastoDetalle {
     clasificacion_nombre: string;
     descripcion: string;
     cuenta_contable_codigo: string | null;
-    monto: number;
-    moneda: string;
+    monto: number; // Monto total en moneda original
+    monto_base: number; // Base sin IGV en moneda original
+    monto_igv: number; // IGV en moneda original
+    moneda: 'USD' | 'PEN'; // Moneda original
     fecha_gasto: Date;
 }
 
@@ -62,46 +76,22 @@ export type DetallesAnalisis = {
     gastos: GastosPorClasificacion;
 };
 
-export interface UtilidadBruta {
-    ventas_totales: number;
-    ventas_totales_sin_igv: number;  // ✅ NUEVO
-    costo_ventas: number;              // ✅ NUEVO (antes costo_adquisicion)
-    utilidad_bruta: number;
-    margen_bruto_porcentaje: number;
-}
-
-export interface UtilidadOperativa {
-    utilidad_bruta: number;
-    gastos_operativos: number;
-    utilidad_operativa: number;
-    margen_operativo_porcentaje: number;
-}
-
-export interface UtilidadNeta {
-    utilidad_operativa: number;
-    gastos_administrativos: number;
-    gastos_ventas: number;
-    gastos_financieros: number;
-    total_otros_gastos: number;
-    utilidad_neta: number;
-    margen_neto_porcentaje: number;
-}
-
-// ✅ NUEVO: Estado de Resultados completo
+// ✅ Estado de Resultados en USD (moneda base)
 export interface EstadoResultados {
     ventas: {
         mercaderias_nacionales: number;
         mercaderias_internacionales: number;
         productos_terminados_nacionales: number;
         productos_terminados_internacionales: number;
-        total_ventas: number;
-        total_ventas_sin_igv: number;
+        total_ventas_sin_igv: number; // ✅ SOLO SIN IGV
     };
     costo_ventas: {
-        materias_primas: number;
-        materiales_auxiliares: number;
-        envases_embalajes: number;
-        costos_vinculados: number; // AD, CVD, SDA
+        // ✅ SOLO CUENTAS 601-604, 609
+        mercaderias: number; // 601
+        materias_primas: number; // 602
+        materiales_auxiliares: number; // 603
+        envases_embalajes: number; // 604
+        costos_vinculados: number; // 609: AD, CVD, SDA
         total_costo_ventas: number;
     };
     utilidad_bruta: number;
@@ -110,7 +100,7 @@ export interface EstadoResultados {
         seguridad_social: number;
         transporte_viajes: number;
         asesoria_consultoria: number;
-        produccion_terceros: number;
+        produccion_terceros: number; // 633
         mantenimiento_reparaciones: number;
         alquileres: number;
         servicios_basicos: number;
@@ -155,17 +145,39 @@ export interface EstadoResultados {
     utilidad_neta: number;
 }
 
-// ✅ NUEVO: Ratios Financieros
+export interface UtilidadBruta {
+    ventas_totales_sin_igv: number; // ✅ SIN IGV
+    costo_ventas: number;
+    utilidad_bruta: number;
+    margen_bruto_porcentaje: number;
+}
+
+export interface UtilidadOperativa {
+    utilidad_bruta: number;
+    gastos_operativos: number;
+    utilidad_operativa: number;
+    margen_operativo_porcentaje: number;
+}
+
+export interface UtilidadNeta {
+    utilidad_operativa: number;
+    gastos_administrativos: number;
+    gastos_ventas: number;
+    gastos_financieros: number;
+    total_otros_gastos: number;
+    utilidad_neta: number;
+    margen_neto_porcentaje: number;
+}
+
 export interface RatiosFinancieros {
     margen_bruto: number;
     margen_operativo: number;
     margen_neto: number;
-    ros: number; // Rentabilidad sobre Ventas (igual a margen_neto)
-    roa: number | null; // Rentabilidad sobre Activos (requiere input)
-    roe: number | null; // Rentabilidad sobre Patrimonio (requiere input)
+    ros: number;
+    roa: number | null;
+    roe: number | null;
 }
 
-// ✅ NUEVO: Interpretación de ratio
 export interface InterpretacionRatio {
     ratio: string;
     valor: number | null;
@@ -181,13 +193,13 @@ export interface RentabilityAnalysis {
     utilidad_operativa: UtilidadOperativa;
     utilidad_neta: UtilidadNeta;
     detalles: DetallesAnalisis;
-    estado_resultados: EstadoResultados;  // ✅ NUEVO
-    ratios_financieros: RatiosFinancieros; // ✅ NUEVO
-    interpretaciones?: InterpretacionRatio[]; // ✅ NUEVO (se calcula en frontend)
+    estado_resultados: EstadoResultados;
+    ratios_financieros: RatiosFinancieros;
+    interpretaciones?: InterpretacionRatio[];
     resumen_monedas: {
         total_usd: number;
         total_pen: number;
-        tipo_cambio_sugerido?: number;
+        tipo_cambio_usado: number; // Para referencia del frontend
     };
 }
 
@@ -197,7 +209,6 @@ export interface RentabilityQueryParams {
     moneda_base?: 'USD' | 'PEN';
 }
 
-// ✅ NUEVO: Inputs opcionales para ratios
 export interface InputsFinancieros {
     activos_totales: number | null;
     patrimonio: number | null;

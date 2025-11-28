@@ -193,4 +193,17 @@ export class ImportacionController {
             res.status(500).json({ message: 'Error al generar el asiento contable' });
         }
     }
+    /**
+     * GET /api/importaciones/tipos-mercancia
+     * Lista todos los tipos de mercancía disponibles
+     */
+    static async listarTiposMercancia(req: Request, res: Response) {
+        try {
+            const tipos = await ImportacionService.listarTiposMercancia();
+            res.json(tipos);
+        } catch (error) {
+            console.error('Error al obtener tipos de mercancía:', error);
+            res.status(500).json({ message: 'Error al obtener los tipos de mercancía' });
+        }
+    }
 }

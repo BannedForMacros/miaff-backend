@@ -2,8 +2,17 @@ import { Router } from 'express';
 import { requireAuth } from '../middlewares/requireAuth';
 import { ExportacionController } from '../controllers/exportacion.controller';
 
+
 const router = Router();
+router.get('/tipos-producto', ExportacionController.listarTiposProducto);
+
+
+
+
 router.use(requireAuth);
+router.get('/asientos-contables', ExportacionController.listarAsientosPorCaso);
+router.get('/:id/asiento-contable', ExportacionController.obtenerAsientoContable);
+router.post('/:id/regenerar-asiento', ExportacionController.regenerarAsientoContable);
 
 /**
  * @openapi
@@ -467,5 +476,6 @@ router.put('/:id', ExportacionController.actualizarExportacion);
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.delete('/:id', ExportacionController.eliminarExportacion);
+
 
 export default router;

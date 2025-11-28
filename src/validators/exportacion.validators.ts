@@ -1,4 +1,4 @@
-// En exportacion.validators.ts
+// exportacion.validators.ts
 import { z } from 'zod';
 
 const incotermEnum = z.enum([
@@ -10,6 +10,7 @@ const incotermEnum = z.enum([
 export const crearExportacionSchema = z.object({
     caso_estudio_id: z.number({ required_error: 'El ID del caso de estudio es requerido.' }).int().positive(),
     es_venta_nacional: z.boolean().default(false),
+    tipo_producto_id: z.number({ required_error: 'El tipo de producto es requerido.' }).int().positive(), // NUEVO
     incoterm: incotermEnum.optional(),
     descripcion_venta: z.string({ required_error: 'La descripción es requerida.' })
         .min(3, 'La descripción debe tener al menos 3 caracteres.')
@@ -23,6 +24,4 @@ export const crearExportacionSchema = z.object({
     fecha_operacion: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'El formato de fecha debe ser YYYY-MM-DD').optional(),
 });
 
-export const actualizarExportacionSchema = crearExportacionSchema.partial().extend({
-    id: z.number().int().positive()
-});
+export const actualizarExportacionSchema = crearExportacionSchema.partial();

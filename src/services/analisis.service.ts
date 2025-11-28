@@ -1,4 +1,4 @@
-// services/analisis.service.ts - VERSIÓN FINAL CON TIPO DE CAMBIO DINÁMICO Y FILTROS ACTIVO
+// services/analisis.service.ts - VERSIÓN FINAL CORREGIDA (ALTA PRECISIÓN)
 
 import { dbQuery } from '../db';
 import { GastoService } from './gastos.service';
@@ -15,7 +15,7 @@ import {
     EstadoResultados,
     RatiosFinancieros
 } from '../types/analisis.types';
-import { ExchangeRateService } from './exchangeRate.service'; // ✅ IMPORTAR SERVICIO DE TC
+import { ExchangeRateService } from './exchangeRate.service';
 
 type CasoInfo = {
     nombre_caso: string;
@@ -38,7 +38,7 @@ type CasoSimple = {
     created_at: Date;
 };
 
-const TASA_IGV = 0.18; // 18%
+const TASA_IGV = 0.18;
 
 export class AnalisisService {
 
@@ -48,112 +48,175 @@ export class AnalisisService {
         return rows.length > 0;
     }
 
+    // ✅ FUNCIÓN HELPER: Validar y convertir número
+    private static validarNumero(valor: any, defecto: number = 0): number {
+        if (valor === null || valor === undefined) return defecto;
+        const num = parseFloat(valor.toString());
+        return isNaN(num) ? defecto : num;
+    }
+
+    // ✅ FUNCIÓN HELPER: Redondear con precisión configurable (Default 4 para API)
+    private static redondear(valor: number, decimales: number = 4): number {
+        const factor = Math.pow(10, decimales);
+        // Number.EPSILON ayuda a evitar errores de punto flotante en bordes (ej: 1.005)
+        return Math.round((valor + Number.EPSILON) * factor) / factor;
+    }
+
+    // ✅ FUNCIÓN HELPER: Convertir SIN PERDER DECIMALES (Raw Float)
+    private static convertirAUSD(monto: number, moneda: string, tipoCambio: number): number {
+        const valor = this.validarNumero(monto, 0);
+        if (!moneda) moneda = 'USD';
+
+        if (moneda === 'USD') {
+            return valor;
+        } else if (moneda === 'PEN') {
+            // CRÍTICO: No redondeamos aquí para mantener la precisión matemática en las sumas
+            return valor / tipoCambio;
+        } else {
+            console.warn(`⚠️ Moneda desconocida: ${moneda}, asumiendo USD`);
+            return valor;
+        }
+    }
+
+    private static calcularPorcentaje(valor: number, base: number): number {
+        if (base === 0) return 0;
+        // Los porcentajes sí los mantenemos a 2 decimales visualmente
+        return parseFloat(((valor / base) * 100).toFixed(2));
+    }
+
     static async obtenerAnalisisRentabilidad(
         casoId: number,
         userId: string,
         incluirDetalles = true
     ): Promise<RentabilityAnalysis> {
 
-        const casoExists = await this.validarCasoExiste(casoId, userId);
-        if (!casoExists) {
-            throw new Error('Caso de estudio no encontrado o no autorizado');
-        }
+        try {
+            console.log(`\n🔍 ========================================`);
+            console.log(`   INICIANDO ANÁLISIS - Caso ID: ${casoId}`);
+            console.log(`========================================`);
 
-        // ✅ OBTENER TIPO DE CAMBIO DINÁMICO
-        const tipoCambio = await ExchangeRateService.getExchangeRate();
-        console.log(`💱 Tipo de cambio actual: S/ ${tipoCambio.toFixed(3)}`);
+            const casoExists = await this.validarCasoExiste(casoId, userId);
+            if (!casoExists) {
+                throw new Error('Caso de estudio no encontrado o no autorizado');
+            }
 
-        const casoInfo = await this.obtenerInfoCaso(casoId);
-        const importaciones = await this.obtenerImportaciones(casoId);
-        const exportaciones = await this.obtenerExportaciones(casoId);
-        const gastos = await this.obtenerGastosPorClasificacion(casoId);
-
-        // ✅ PASAR TIPO DE CAMBIO A LOS CÁLCULOS
-        const estadoResultados = this.calcularEstadoResultados(
-            exportaciones,
-            importaciones,
-            gastos,
-            tipoCambio // ✅ NUEVO PARÁMETRO
-        );
-
-        // Calcular utilidades (compatibilidad)
-        const utilidadBruta: UtilidadBruta = {
-            ventas_totales: estadoResultados.ventas.total_ventas,
-            ventas_totales_sin_igv: estadoResultados.ventas.total_ventas_sin_igv,
-            costo_ventas: estadoResultados.costo_ventas.total_costo_ventas,
-            utilidad_bruta: estadoResultados.utilidad_bruta,
-            margen_bruto_porcentaje: this.calcularPorcentaje(
-                estadoResultados.utilidad_bruta,
-                estadoResultados.ventas.total_ventas_sin_igv
-            )
-        };
-
-        const utilidadOperativa: UtilidadOperativa = {
-            utilidad_bruta: estadoResultados.utilidad_bruta,
-            gastos_operativos: estadoResultados.gastos_operativos.total_gastos_operativos,
-            utilidad_operativa: estadoResultados.utilidad_operativa,
-            margen_operativo_porcentaje: this.calcularPorcentaje(
-                estadoResultados.utilidad_operativa,
-                estadoResultados.ventas.total_ventas_sin_igv
-            )
-        };
-
-        const utilidadNeta: UtilidadNeta = {
-            utilidad_operativa: estadoResultados.utilidad_operativa,
-            gastos_administrativos: estadoResultados.gastos_administrativos.total_gastos_administrativos,
-            gastos_ventas: estadoResultados.gastos_ventas.total_gastos_ventas,
-            gastos_financieros: estadoResultados.gastos_financieros.total_gastos_financieros,
-            total_otros_gastos:
-                estadoResultados.gastos_administrativos.total_gastos_administrativos +
-                estadoResultados.gastos_ventas.total_gastos_ventas +
-                estadoResultados.gastos_financieros.total_gastos_financieros,
-            utilidad_neta: estadoResultados.utilidad_neta,
-            margen_neto_porcentaje: this.calcularPorcentaje(
-                estadoResultados.utilidad_neta,
-                estadoResultados.ventas.total_ventas_sin_igv
-            )
-        };
-
-        // Calcular ratios financieros (sin ROA/ROE, se calculan en frontend)
-        const ratiosFinancieros: RatiosFinancieros = {
-            margen_bruto: utilidadBruta.margen_bruto_porcentaje,
-            margen_operativo: utilidadOperativa.margen_operativo_porcentaje,
-            margen_neto: utilidadNeta.margen_neto_porcentaje,
-            ros: utilidadNeta.margen_neto_porcentaje,
-            roa: null,
-            roe: null
-        };
-
-        // ✅ PASAR TIPO DE CAMBIO AL RESUMEN
-        const resumenMonedas = this.calcularResumenMonedas(
-            importaciones,
-            exportaciones,
-            gastos,
-            tipoCambio // ✅ NUEVO PARÁMETRO
-        );
-
-        const result: RentabilityAnalysis = {
-            caso_estudio_id: casoId,
-            nombre_caso: casoInfo.nombre_caso,
-            utilidad_bruta: utilidadBruta,
-            utilidad_operativa: utilidadOperativa,
-            utilidad_neta: utilidadNeta,
-            detalles: {
-                importaciones: incluirDetalles ? importaciones : [],
-                exportaciones: incluirDetalles ? exportaciones : [],
-                gastos: incluirDetalles ? gastos : {
-                    operativos: [],
-                    administrativos: [],
-                    ventas: [],
-                    financieros: []
+            // ✅ VALIDAR TIPO DE CAMBIO
+            let tipoCambio: number;
+            try {
+                tipoCambio = await ExchangeRateService.getExchangeRate();
+                if (!tipoCambio || tipoCambio <= 0) {
+                    console.warn('⚠️ Tipo de cambio inválido, usando valor por defecto: 3.75');
+                    tipoCambio = 3.75;
                 }
-            },
-            estado_resultados: estadoResultados,
-            ratios_financieros: ratiosFinancieros,
-            resumen_monedas: resumenMonedas
-        };
+                console.log(`💱 Tipo de cambio: S/ ${tipoCambio.toFixed(4)}`);
+            } catch (error) {
+                console.error('❌ Error obteniendo tipo de cambio:', error);
+                tipoCambio = 3.75; // Valor por defecto
+                console.warn(`⚠️ Usando tipo de cambio por defecto: ${tipoCambio}`);
+            }
 
-        return result;
+            const casoInfo = await this.obtenerInfoCaso(casoId);
+            const importaciones = await this.obtenerImportaciones(casoId);
+            const exportaciones = await this.obtenerExportaciones(casoId);
+            const gastos = await this.obtenerGastosPorClasificacion(casoId);
+
+            console.log(`\n📊 Datos obtenidos:`);
+            console.log(`   Importaciones: ${importaciones.length}`);
+            console.log(`   Exportaciones: ${exportaciones.length}`);
+            console.log(`   Gastos: ${gastos.operativos.length + gastos.administrativos.length + gastos.ventas.length + gastos.financieros.length}`);
+
+            const estadoResultados = this.calcularEstadoResultados(
+                exportaciones,
+                importaciones,
+                gastos,
+                tipoCambio
+            );
+
+            const utilidadBruta: UtilidadBruta = {
+                ventas_totales_sin_igv: estadoResultados.ventas.total_ventas_sin_igv,
+                costo_ventas: estadoResultados.costo_ventas.total_costo_ventas,
+                utilidad_bruta: estadoResultados.utilidad_bruta,
+                margen_bruto_porcentaje: this.calcularPorcentaje(
+                    estadoResultados.utilidad_bruta,
+                    estadoResultados.ventas.total_ventas_sin_igv
+                )
+            };
+
+            const utilidadOperativa: UtilidadOperativa = {
+                utilidad_bruta: estadoResultados.utilidad_bruta,
+                gastos_operativos: estadoResultados.gastos_operativos.total_gastos_operativos,
+                utilidad_operativa: estadoResultados.utilidad_operativa,
+                margen_operativo_porcentaje: this.calcularPorcentaje(
+                    estadoResultados.utilidad_operativa,
+                    estadoResultados.ventas.total_ventas_sin_igv
+                )
+            };
+
+            const utilidadNeta: UtilidadNeta = {
+                utilidad_operativa: estadoResultados.utilidad_operativa,
+                gastos_administrativos: estadoResultados.gastos_administrativos.total_gastos_administrativos,
+                gastos_ventas: estadoResultados.gastos_ventas.total_gastos_ventas,
+                gastos_financieros: estadoResultados.gastos_financieros.total_gastos_financieros,
+                total_otros_gastos: this.redondear(
+                    estadoResultados.gastos_administrativos.total_gastos_administrativos +
+                    estadoResultados.gastos_ventas.total_gastos_ventas +
+                    estadoResultados.gastos_financieros.total_gastos_financieros
+                ),
+                utilidad_neta: estadoResultados.utilidad_neta,
+                margen_neto_porcentaje: this.calcularPorcentaje(
+                    estadoResultados.utilidad_neta,
+                    estadoResultados.ventas.total_ventas_sin_igv
+                )
+            };
+
+            const ratiosFinancieros: RatiosFinancieros = {
+                margen_bruto: utilidadBruta.margen_bruto_porcentaje,
+                margen_operativo: utilidadOperativa.margen_operativo_porcentaje,
+                margen_neto: utilidadNeta.margen_neto_porcentaje,
+                ros: utilidadNeta.margen_neto_porcentaje,
+                roa: null,
+                roe: null
+            };
+
+            const resumenMonedas = this.calcularResumenMonedas(
+                importaciones,
+                exportaciones,
+                gastos,
+                tipoCambio
+            );
+
+            console.log(`\n✅ ANÁLISIS COMPLETADO EXITOSAMENTE`);
+            console.log(`========================================\n`);
+
+            const result: RentabilityAnalysis = {
+                caso_estudio_id: casoId,
+                nombre_caso: casoInfo.nombre_caso,
+                utilidad_bruta: utilidadBruta,
+                utilidad_operativa: utilidadOperativa,
+                utilidad_neta: utilidadNeta,
+                detalles: {
+                    importaciones: incluirDetalles ? importaciones : [],
+                    exportaciones: incluirDetalles ? exportaciones : [],
+                    gastos: incluirDetalles ? gastos : {
+                        operativos: [],
+                        administrativos: [],
+                        ventas: [],
+                        financieros: []
+                    }
+                },
+                estado_resultados: estadoResultados,
+                ratios_financieros: ratiosFinancieros,
+                resumen_monedas: resumenMonedas
+            };
+
+            return result;
+
+        } catch (error: any) {
+            console.error(`\n❌ ERROR EN obtenerAnalisisRentabilidad:`);
+            console.error(`   Mensaje: ${error.message}`);
+            console.error(`   Stack: ${error.stack}`);
+            throw error;
+        }
     }
 
     private static async obtenerInfoCaso(casoId: number): Promise<CasoInfo> {
@@ -162,26 +225,77 @@ export class AnalisisService {
             FROM miaff.casos_de_estudio WHERE id = $1
         `;
         const { rows } = await dbQuery<CasoInfo>(sql, [casoId]);
+        if (rows.length === 0) {
+            throw new Error(`Caso ${casoId} no encontrado`);
+        }
         return rows[0];
     }
 
-    // ✅ FILTRO AGREGADO: activo = 1
+    // ✅ OBTENER IMPORTACIONES
     private static async obtenerImportaciones(casoId: number): Promise<ImportacionDetalle[]> {
         const sql = `
-            SELECT i.id, i.subpartida_hs10, i.descripcion_mercancia,
-                   i.valor_fob, i.valor_flete, i.valor_seguro, i.valor_cif,
-                   i.monto_ad_valorem, i.monto_isc, i.monto_igv, i.monto_ipm,
-                   i.monto_percepcion, i.dta_total, i.fecha_operacion
+            SELECT
+                i.id,
+                i.subpartida_hs10,
+                i.descripcion_mercancia,
+                i.tipo_mercancia_id,
+                tm.cuenta_contable as tipo_mercancia_cuenta,
+                tm.nombre as tipo_mercancia_nombre,
+                i.valor_fob,
+                i.valor_flete,
+                i.valor_seguro,
+                i.valor_cif,
+                i.monto_ad_valorem,
+                i.monto_isc,
+                i.monto_igv,
+                i.monto_ipm,
+                i.monto_percepcion,
+                i.dta_total,
+                i.antidumping_ingresado,
+                i.compensatorio_ingresado,
+                i.sda_ingresado,
+                i.moneda,
+                i.fecha_operacion
             FROM miaff.importaciones i
+                     LEFT JOIN miaff.tipo_mercancia_importacion tm ON tm.id = i.tipo_mercancia_id
             WHERE i.caso_estudio_id = $1 AND i.activo = 1
             ORDER BY i.fecha_operacion DESC, i.id DESC
         `;
-        const { rows } = await dbQuery<ImportacionDetalle>(sql, [casoId]);
-        const importaciones = rows;
-        for (const imp of importaciones) {
-            imp.tributos = await this.obtenerTributosImportacion(imp.id);
+
+        try {
+            const { rows } = await dbQuery<ImportacionDetalle>(sql, [casoId]);
+
+            const importaciones = rows.map(imp => ({
+                ...imp,
+                valor_fob: this.validarNumero(imp.valor_fob),
+                valor_flete: this.validarNumero(imp.valor_flete),
+                valor_seguro: this.validarNumero(imp.valor_seguro),
+                valor_cif: this.validarNumero(imp.valor_cif),
+                monto_ad_valorem: this.validarNumero(imp.monto_ad_valorem),
+                monto_isc: this.validarNumero(imp.monto_isc),
+                monto_igv: this.validarNumero(imp.monto_igv),
+                monto_ipm: this.validarNumero(imp.monto_ipm),
+                monto_percepcion: this.validarNumero(imp.monto_percepcion),
+                dta_total: this.validarNumero(imp.dta_total),
+                antidumping_ingresado: this.validarNumero(imp.antidumping_ingresado),
+                compensatorio_ingresado: this.validarNumero(imp.compensatorio_ingresado),
+                sda_ingresado: this.validarNumero(imp.sda_ingresado),
+                moneda: imp.moneda || 'USD'
+            }));
+
+            for (const imp of importaciones) {
+                try {
+                    imp.tributos = await this.obtenerTributosImportacion(imp.id);
+                } catch (error) {
+                    console.warn(`⚠️ Error obteniendo tributos para importación ${imp.id}:`, error);
+                    imp.tributos = [];
+                }
+            }
+            return importaciones;
+        } catch (error: any) {
+            console.error(`❌ Error en obtenerImportaciones:`, error);
+            throw new Error(`Error obteniendo importaciones: ${error.message}`);
         }
-        return importaciones;
     }
 
     private static async obtenerTributosImportacion(importacionId: number): Promise<Tributo[]> {
@@ -191,23 +305,60 @@ export class AnalisisService {
             WHERE importacion_id = $1
             ORDER BY concepto
         `;
-        const { rows } = await dbQuery<Tributo>(sql, [importacionId]);
-        return rows;
+        try {
+            const { rows } = await dbQuery<Tributo>(sql, [importacionId]);
+            return rows.map(t => ({
+                ...t,
+                base_imponible: this.validarNumero(t.base_imponible),
+                tasa_aplicada: this.validarNumero(t.tasa_aplicada),
+                monto_calculado: this.validarNumero(t.monto_calculado)
+            }));
+        } catch (error) {
+            return [];
+        }
     }
 
-    // ✅ FILTRO AGREGADO: activo = true
+    // ✅ OBTENER EXPORTACIONES
     private static async obtenerExportaciones(casoId: number): Promise<ExportacionDetalle[]> {
         const sql = `
-            SELECT id, es_venta_nacional, incoterm, descripcion_venta,
-                   valor_venta, moneda, fecha_operacion, pais_origen, pais_destino
-            FROM miaff.exportaciones
-            WHERE caso_estudio_id = $1 AND activo = true
-            ORDER BY fecha_operacion DESC, id DESC
+            SELECT
+                e.id,
+                e.es_venta_nacional,
+                e.tipo_producto_id,
+                tp.nombre as tipo_producto_nombre,
+                tp.cuenta_contable as tipo_producto_cuenta,
+                e.incoterm,
+                e.descripcion_venta,
+                e.valor_venta,
+                e.monto_base,
+                e.monto_igv,
+                e.moneda,
+                e.fecha_operacion,
+                e.pais_origen,
+                e.pais_destino
+            FROM miaff.exportaciones e
+                     LEFT JOIN miaff.tipo_producto_venta tp ON tp.id = e.tipo_producto_id
+            WHERE e.caso_estudio_id = $1 AND e.activo = true
+            ORDER BY e.fecha_operacion DESC, e.id DESC
         `;
-        const { rows } = await dbQuery<ExportacionDetalle>(sql, [casoId]);
-        return rows;
+
+        try {
+            const { rows } = await dbQuery<any>(sql, [casoId]);
+            return rows.map((row: any) => ({
+                ...row,
+                valor_venta: this.validarNumero(row.valor_venta),
+                monto_base: this.validarNumero(row.monto_base),
+                monto_igv: this.validarNumero(row.monto_igv),
+                moneda: row.moneda || 'USD',
+                es_venta_nacional: row.es_venta_nacional || false
+            }));
+        } catch (error: any) {
+            console.error(`❌ Error en obtenerExportaciones:`, error);
+            throw new Error(`Error obteniendo exportaciones: ${error.message}`);
+        }
     }
 
+    // ✅ OBTENER GASTOS
     private static async obtenerGastosPorClasificacion(casoId: number): Promise<GastosPorClasificacion> {
         const sql = `
             SELECT
@@ -217,177 +368,168 @@ export class AnalisisService {
                 g.descripcion,
                 g.cuenta_contable_codigo,
                 g.monto,
+                g.monto_base,
+                g.monto_igv,
                 g.moneda,
                 g.fecha_gasto
             FROM miaff.gastos g
                      INNER JOIN miaff.clasificacion_gastos cg ON g.clasificacion_id = cg.id
-            WHERE g.caso_estudio_id = $1
+            WHERE g.caso_estudio_id = $1 AND g.activo = 1
             ORDER BY g.fecha_gasto DESC, g.id DESC
         `;
 
-        const { rows } = await dbQuery<GastoDetalle>(sql, [casoId]);
+        try {
+            const { rows } = await dbQuery<any>(sql, [casoId]);
 
-        console.log('📊 Gastos obtenidos:', rows.length);
-        if (rows.length > 0) {
-            console.log('📋 Ejemplo de gasto:', {
-                id: rows[0].id,
-                descripcion: rows[0].descripcion,
-                clasificacion_nombre: rows[0].clasificacion_nombre,
-                monto: rows[0].monto
+            const gastos = rows.map((row: any) => ({
+                ...row,
+                monto: this.validarNumero(row.monto),
+                monto_base: this.validarNumero(row.monto_base),
+                monto_igv: this.validarNumero(row.monto_igv),
+                moneda: row.moneda || 'PEN',
+                descripcion: row.descripcion || 'Sin descripción'
+            }));
+
+            const gastosPorClasificacion: GastosPorClasificacion = {
+                operativos: [],
+                administrativos: [],
+                ventas: [],
+                financieros: []
+            };
+
+            gastos.forEach(gasto => {
+                const tipoGasto = (gasto.clasificacion_nombre || '').toUpperCase();
+                if (tipoGasto === 'OPERATIVO') gastosPorClasificacion.operativos.push(gasto);
+                else if (tipoGasto === 'ADMINISTRATIVO') gastosPorClasificacion.administrativos.push(gasto);
+                else if (tipoGasto === 'VENTAS') gastosPorClasificacion.ventas.push(gasto);
+                else if (tipoGasto === 'FINANCIERO') gastosPorClasificacion.financieros.push(gasto);
             });
+
+            return gastosPorClasificacion;
+        } catch (error: any) {
+            console.error(`❌ Error en obtenerGastosPorClasificacion:`, error);
+            throw new Error(`Error obteniendo gastos: ${error.message}`);
         }
-
-        const gastosPorClasificacion: GastosPorClasificacion = {
-            operativos: [],
-            administrativos: [],
-            ventas: [],
-            financieros: []
-        };
-
-        rows.forEach(gasto => {
-            const tipoGasto = gasto.clasificacion_nombre.toUpperCase();
-
-            console.log(`🔍 Clasificando gasto ID ${gasto.id}: ${tipoGasto}`);
-
-            if (tipoGasto === 'OPERATIVO') {
-                gastosPorClasificacion.operativos.push(gasto);
-            } else if (tipoGasto === 'ADMINISTRATIVO') {
-                gastosPorClasificacion.administrativos.push(gasto);
-            } else if (tipoGasto === 'VENTAS') {
-                gastosPorClasificacion.ventas.push(gasto);
-            } else if (tipoGasto === 'FINANCIERO') {
-                gastosPorClasificacion.financieros.push(gasto);
-            } else {
-                console.warn(`⚠️ Tipo de gasto no reconocido: ${tipoGasto} para gasto ID ${gasto.id}`);
-            }
-        });
-
-        console.log('✅ Resumen de clasificación:', {
-            operativos: gastosPorClasificacion.operativos.length,
-            administrativos: gastosPorClasificacion.administrativos.length,
-            ventas: gastosPorClasificacion.ventas.length,
-            financieros: gastosPorClasificacion.financieros.length
-        });
-
-        return gastosPorClasificacion;
     }
 
-    // ✅ CALCULAR ESTADO DE RESULTADOS CON TIPO DE CAMBIO DINÁMICO
+    // ✅ CALCULAR ESTADO DE RESULTADOS (LÓGICA MEJORADA DE PRECISIÓN)
     private static calcularEstadoResultados(
         exportaciones: ExportacionDetalle[],
         importaciones: ImportacionDetalle[],
         gastos: GastosPorClasificacion,
-        tipoCambio: number // ✅ NUEVO PARÁMETRO
+        tipoCambio: number
     ): EstadoResultados {
 
-        console.log(`💱 Calculando Estado de Resultados con TC: S/ ${tipoCambio.toFixed(3)}`);
+        try {
+            console.log(`\n💱 ========================================`);
+            console.log(`   CALCULANDO ESTADO DE RESULTADOS`);
+            console.log(`   Tipo de Cambio: S/ ${tipoCambio.toFixed(4)}`);
+            console.log(`========================================\n`);
 
-        // 1. VENTAS
-        let mercaderiasNacionales = 0;
-        let mercaderiasInternacionales = 0;
-        let productosNacionales = 0;
-        let productosInternacionales = 0;
+            // 1. VENTAS
+            let mercaderiasNacionales = 0;
+            let mercaderiasInternacionales = 0;
+            let productosNacionales = 0;
+            let productosInternacionales = 0;
 
-        exportaciones.forEach(exp => {
-            const valorUSD = exp.moneda === 'USD'
-                ? parseFloat(exp.valor_venta.toString())
-                : parseFloat(exp.valor_venta.toString()) / tipoCambio; // ✅ USAR TC DINÁMICO
+            exportaciones.forEach((exp) => {
+                const baseUSD = this.convertirAUSD(exp.monto_base, exp.moneda, tipoCambio);
+                if (exp.es_venta_nacional) {
+                    if (exp.tipo_producto_cuenta?.startsWith('701')) mercaderiasNacionales += baseUSD;
+                    else if (exp.tipo_producto_cuenta?.startsWith('702')) productosNacionales += baseUSD;
+                } else {
+                    if (exp.tipo_producto_cuenta?.startsWith('701')) mercaderiasInternacionales += baseUSD;
+                    else if (exp.tipo_producto_cuenta?.startsWith('702')) productosInternacionales += baseUSD;
+                }
+            });
 
-            if (exp.es_venta_nacional) {
-                mercaderiasNacionales += valorUSD;
-            } else {
-                mercaderiasInternacionales += valorUSD;
-            }
-        });
+            const totalVentasSinIgv = mercaderiasNacionales + mercaderiasInternacionales +
+                productosNacionales + productosInternacionales;
 
-        const totalVentas = mercaderiasNacionales + mercaderiasInternacionales + productosNacionales + productosInternacionales;
-        const totalVentasSinIgv = totalVentas / (1 + TASA_IGV);
+            // 2. COSTO DE VENTAS
+            let mercaderias = 0;
+            let materiasPrimas = 0;
+            let materialesAuxiliares = 0;
+            let envasesEmbalajes = 0;
+            let costosVinculados = 0;
 
-        // 2. COSTO DE VENTAS
-        let materiasPrimas = 0;
-        let materialesAuxiliares = 0;
-        let envasesEmbalajes = 0;
-        let costosVinculados = 0;
+            importaciones.forEach((imp) => {
+                const cifUSD = this.convertirAUSD(imp.valor_cif, imp.moneda, tipoCambio);
+                const adUSD = this.convertirAUSD(imp.antidumping_ingresado, imp.moneda, tipoCambio);
+                const cvdUSD = this.convertirAUSD(imp.compensatorio_ingresado, imp.moneda, tipoCambio);
+                const sdaUSD = this.convertirAUSD(imp.sda_ingresado, imp.moneda, tipoCambio);
 
-        importaciones.forEach(imp => {
-            const valorCif = parseFloat(imp.valor_cif.toString()) || 0;
-            const dtaTotal = parseFloat(imp.dta_total.toString()) || 0;
+                switch (imp.tipo_mercancia_cuenta) {
+                    case '601': mercaderias += cifUSD; break;
+                    case '602': materiasPrimas += cifUSD; break;
+                    case '603': materialesAuxiliares += cifUSD; break;
+                    case '604': envasesEmbalajes += cifUSD; break;
+                }
+                costosVinculados += (adUSD + cvdUSD + sdaUSD);
+            });
 
-            const tributos = imp.tributos || [];
-            const costosVinculadosImp = tributos
-                .filter(t => ['antidumping', 'compensatorio', 'sda'].includes(t.concepto.toLowerCase()))
-                .reduce((sum, t) => sum + (parseFloat(t.monto_calculado.toString()) || 0), 0);
+            const totalCostoVentas = mercaderias + materiasPrimas + materialesAuxiliares +
+                envasesEmbalajes + costosVinculados;
 
-            costosVinculados += costosVinculadosImp;
-            materiasPrimas += (valorCif + dtaTotal - costosVinculadosImp);
-        });
+            // 3. UTILIDAD BRUTA (Cálculo con floats puros)
+            const utilidadBruta = totalVentasSinIgv - totalCostoVentas;
 
-        const totalCostoVentas = materiasPrimas + materialesAuxiliares + envasesEmbalajes + costosVinculados;
+            // 4-8. GASTOS (Desglose devuelve valores redondeados, pero total con precisión para cálculo)
+            const gastosOperativosDetalle = this.desglosarGastos(gastos.operativos, tipoCambio);
+            const gastosAdministrativosDetalle = this.desglosarGastos(gastos.administrativos, tipoCambio);
+            const gastosVentasDetalle = this.desglosarGastosVentas(gastos.ventas, tipoCambio);
+            const gastosFinancierosDetalle = this.desglosarGastosFinancieros(gastos.financieros, tipoCambio);
 
-        // 3. UTILIDAD BRUTA
-        const utilidadBruta = totalVentasSinIgv - totalCostoVentas;
+            const utilidadOperativa = utilidadBruta - gastosOperativosDetalle.totalRaw;
+            const utilidadNeta = utilidadOperativa - gastosAdministrativosDetalle.totalRaw -
+                gastosVentasDetalle.totalRaw - gastosFinancierosDetalle.totalRaw;
 
-        // 4. GASTOS OPERATIVOS (desglosados) ✅ PASAR TC
-        const gastosOperativosDetalle = this.desglosarGastos(gastos.operativos, tipoCambio);
-        const totalGastosOperativos = gastosOperativosDetalle.total;
+            console.log(`✅ ESTADO DE RESULTADOS CALCULADO\n`);
 
-        // 5. UTILIDAD OPERATIVA
-        const utilidadOperativa = utilidadBruta - totalGastosOperativos;
+            // 🎯 APLICAMOS REDONDEO A 4 DECIMALES AL FINAL PARA EL JSON
+            return {
+                ventas: {
+                    mercaderias_nacionales: this.redondear(mercaderiasNacionales),
+                    mercaderias_internacionales: this.redondear(mercaderiasInternacionales),
+                    productos_terminados_nacionales: this.redondear(productosNacionales),
+                    productos_terminados_internacionales: this.redondear(productosInternacionales),
+                    total_ventas_sin_igv: this.redondear(totalVentasSinIgv)
+                },
+                costo_ventas: {
+                    mercaderias: this.redondear(mercaderias),
+                    materias_primas: this.redondear(materiasPrimas),
+                    materiales_auxiliares: this.redondear(materialesAuxiliares),
+                    envases_embalajes: this.redondear(envasesEmbalajes),
+                    costos_vinculados: this.redondear(costosVinculados),
+                    total_costo_ventas: this.redondear(totalCostoVentas)
+                },
+                utilidad_bruta: this.redondear(utilidadBruta),
+                gastos_operativos: {
+                    ...gastosOperativosDetalle.desglose,
+                    total_gastos_operativos: this.redondear(gastosOperativosDetalle.totalRaw)
+                },
+                utilidad_operativa: this.redondear(utilidadOperativa),
+                gastos_administrativos: {
+                    ...gastosAdministrativosDetalle.desglose,
+                    total_gastos_administrativos: this.redondear(gastosAdministrativosDetalle.totalRaw)
+                },
+                gastos_ventas: {
+                    ...gastosVentasDetalle.desglose,
+                    total_gastos_ventas: this.redondear(gastosVentasDetalle.totalRaw)
+                },
+                gastos_financieros: {
+                    ...gastosFinancierosDetalle.desglose,
+                    total_gastos_financieros: this.redondear(gastosFinancierosDetalle.totalRaw)
+                },
+                utilidad_neta: this.redondear(utilidadNeta)
+            };
 
-        // 6. GASTOS ADMINISTRATIVOS (desglosados) ✅ PASAR TC
-        const gastosAdministrativosDetalle = this.desglosarGastos(gastos.administrativos, tipoCambio);
-        const totalGastosAdministrativos = gastosAdministrativosDetalle.total;
-
-        // 7. GASTOS DE VENTAS (desglosados) ✅ PASAR TC
-        const gastosVentasDetalle = this.desglosarGastosVentas(gastos.ventas, tipoCambio);
-        const totalGastosVentas = gastosVentasDetalle.total;
-
-        // 8. GASTOS FINANCIEROS (desglosados) ✅ PASAR TC
-        const gastosFinancierosDetalle = this.desglosarGastosFinancieros(gastos.financieros, tipoCambio);
-        const totalGastosFinancieros = gastosFinancierosDetalle.total;
-
-        // 9. UTILIDAD NETA
-        const utilidadNeta = utilidadOperativa - totalGastosAdministrativos - totalGastosVentas - totalGastosFinancieros;
-
-        return {
-            ventas: {
-                mercaderias_nacionales: this.redondear(mercaderiasNacionales),
-                mercaderias_internacionales: this.redondear(mercaderiasInternacionales),
-                productos_terminados_nacionales: this.redondear(productosNacionales),
-                productos_terminados_internacionales: this.redondear(productosInternacionales),
-                total_ventas: this.redondear(totalVentas),
-                total_ventas_sin_igv: this.redondear(totalVentasSinIgv)
-            },
-            costo_ventas: {
-                materias_primas: this.redondear(materiasPrimas),
-                materiales_auxiliares: this.redondear(materialesAuxiliares),
-                envases_embalajes: this.redondear(envasesEmbalajes),
-                costos_vinculados: this.redondear(costosVinculados),
-                total_costo_ventas: this.redondear(totalCostoVentas)
-            },
-            utilidad_bruta: this.redondear(utilidadBruta),
-            gastos_operativos: {
-                ...gastosOperativosDetalle,
-                total_gastos_operativos: this.redondear(totalGastosOperativos)
-            },
-            utilidad_operativa: this.redondear(utilidadOperativa),
-            gastos_administrativos: {
-                ...gastosAdministrativosDetalle,
-                total_gastos_administrativos: this.redondear(totalGastosAdministrativos)
-            },
-            gastos_ventas: {
-                ...gastosVentasDetalle,
-                total_gastos_ventas: this.redondear(totalGastosVentas)
-            },
-            gastos_financieros: {
-                ...gastosFinancierosDetalle,
-                total_gastos_financieros: this.redondear(totalGastosFinancieros)
-            },
-            utilidad_neta: this.redondear(utilidadNeta)
-        };
+        } catch (error: any) {
+            console.error(`❌ Error en calcularEstadoResultados:`, error);
+            throw new Error(`Error calculando estado de resultados: ${error.message}`);
+        }
     }
 
-    // ✅ DESGLOSAR GASTOS CON TIPO DE CAMBIO DINÁMICO
     private static desglosarGastos(gastos: GastoDetalle[], tipoCambio: number) {
         let remuneraciones = 0;
         let seguridadSocial = 0;
@@ -402,123 +544,131 @@ export class AnalisisService {
         let otrosGastos = 0;
 
         gastos.forEach(gasto => {
-            const monto = this.convertirAUSD(gasto.monto, gasto.moneda, tipoCambio); // ✅ PASAR TC
-            const desc = gasto.descripcion.toLowerCase();
-            const cuenta = (gasto.cuenta_contable_codigo || '').toLowerCase();
+            try {
+                const montoUSD = this.convertirAUSD(gasto.monto_base, gasto.moneda, tipoCambio);
+                const desc = (gasto.descripcion || '').toLowerCase();
+                const cuenta = (gasto.cuenta_contable_codigo || '').toLowerCase();
 
-            if (desc.includes('remunerac') || cuenta.startsWith('621')) remuneraciones += monto;
-            else if (desc.includes('seguridad') || desc.includes('social') || desc.includes('essalud') || cuenta.startsWith('627')) seguridadSocial += monto;
-            else if (desc.includes('transport') || desc.includes('viaje') || cuenta.startsWith('631')) transporteViajes += monto;
-            else if (desc.includes('asesor') || desc.includes('consult') || cuenta.startsWith('632')) asesoriaConsultoria += monto;
-            else if (desc.includes('producc') || desc.includes('tercer') || cuenta.startsWith('633')) produccionTerceros += monto;
-            else if (desc.includes('mantenimiento') || desc.includes('reparac') || cuenta.startsWith('634')) mantenimientoReparaciones += monto;
-            else if (desc.includes('alquiler') || cuenta.startsWith('635')) alquileres += monto;
-            else if (desc.includes('luz') || desc.includes('agua') || desc.includes('internet') || cuenta.startsWith('636')) serviciosBasicos += monto;
-            else if (desc.includes('servicio') || cuenta.startsWith('639')) otrosServicios += monto;
-            else if (desc.includes('seguro') || cuenta.startsWith('651')) seguros += monto;
-            else otrosGastos += monto;
+                if (desc.includes('remunerac') || cuenta.startsWith('621')) remuneraciones += montoUSD;
+                else if (desc.includes('seguridad') || desc.includes('social') || desc.includes('essalud') || cuenta.startsWith('627')) seguridadSocial += montoUSD;
+                else if (desc.includes('transport') || desc.includes('viaje') || cuenta.startsWith('631')) transporteViajes += montoUSD;
+                else if (desc.includes('asesor') || desc.includes('consult') || cuenta.startsWith('632')) asesoriaConsultoria += montoUSD;
+                else if (desc.includes('producc') || desc.includes('tercer') || cuenta.startsWith('633')) produccionTerceros += montoUSD;
+                else if (desc.includes('mantenimiento') || desc.includes('reparac') || cuenta.startsWith('634')) mantenimientoReparaciones += montoUSD;
+                else if (desc.includes('alquiler') || cuenta.startsWith('635')) alquileres += montoUSD;
+                else if (desc.includes('luz') || desc.includes('agua') || desc.includes('internet') || cuenta.startsWith('636')) serviciosBasicos += montoUSD;
+                else if (desc.includes('servicio') || cuenta.startsWith('639')) otrosServicios += montoUSD;
+                else if (desc.includes('seguro') || cuenta.startsWith('651')) seguros += montoUSD;
+                else otrosGastos += montoUSD;
+            } catch (error) {
+                console.warn(`⚠️ Error procesando gasto ${gasto.id}:`, error);
+            }
         });
 
+        const totalRaw = remuneraciones + seguridadSocial + transporteViajes + asesoriaConsultoria +
+            produccionTerceros + mantenimientoReparaciones + alquileres +
+            serviciosBasicos + otrosServicios + seguros + otrosGastos;
+
         return {
-            remuneraciones: this.redondear(remuneraciones),
-            seguridad_social: this.redondear(seguridadSocial),
-            transporte_viajes: this.redondear(transporteViajes),
-            asesoria_consultoria: this.redondear(asesoriaConsultoria),
-            produccion_terceros: this.redondear(produccionTerceros),
-            mantenimiento_reparaciones: this.redondear(mantenimientoReparaciones),
-            alquileres: this.redondear(alquileres),
-            servicios_basicos: this.redondear(serviciosBasicos),
-            otros_servicios: this.redondear(otrosServicios),
-            seguros: this.redondear(seguros),
-            otros_gastos: this.redondear(otrosGastos),
-            total: remuneraciones + seguridadSocial + transporteViajes + asesoriaConsultoria +
-                produccionTerceros + mantenimientoReparaciones + alquileres +
-                serviciosBasicos + otrosServicios + seguros + otrosGastos
+            totalRaw, // Devolvemos el total sin redondear para cálculos superiores
+            desglose: {
+                remuneraciones: this.redondear(remuneraciones),
+                seguridad_social: this.redondear(seguridadSocial),
+                transporte_viajes: this.redondear(transporteViajes),
+                asesoria_consultoria: this.redondear(asesoriaConsultoria),
+                produccion_terceros: this.redondear(produccionTerceros),
+                mantenimiento_reparaciones: this.redondear(mantenimientoReparaciones),
+                alquileres: this.redondear(alquileres),
+                servicios_basicos: this.redondear(serviciosBasicos),
+                otros_servicios: this.redondear(otrosServicios),
+                seguros: this.redondear(seguros),
+                otros_gastos: this.redondear(otrosGastos)
+            }
         };
     }
 
-    // ✅ DESGLOSAR GASTOS DE VENTAS CON TC
     private static desglosarGastosVentas(gastos: GastoDetalle[], tipoCambio: number) {
-        const base = this.desglosarGastos(gastos, tipoCambio); // ✅ PASAR TC
+        const base = this.desglosarGastos(gastos, tipoCambio);
         let publicidad = 0;
 
         gastos.forEach(gasto => {
-            const monto = this.convertirAUSD(gasto.monto, gasto.moneda, tipoCambio); // ✅ PASAR TC
-            const desc = gasto.descripcion.toLowerCase();
-            const cuenta = (gasto.cuenta_contable_codigo || '').toLowerCase();
+            try {
+                const montoUSD = this.convertirAUSD(gasto.monto_base, gasto.moneda, tipoCambio);
+                const desc = (gasto.descripcion || '').toLowerCase();
+                const cuenta = (gasto.cuenta_contable_codigo || '').toLowerCase();
 
-            if (desc.includes('publicidad') || desc.includes('marketing') || desc.includes('publicacion') || cuenta.startsWith('637')) {
-                publicidad += monto;
+                if (desc.includes('publicidad') || desc.includes('marketing') || desc.includes('publicacion') || cuenta.startsWith('637')) {
+                    publicidad += montoUSD;
+                }
+            } catch (error) {
+                console.warn(`⚠️ Error procesando gasto de ventas ${gasto.id}:`, error);
             }
         });
 
         return {
-            ...base,
-            publicidad: this.redondear(publicidad)
+            totalRaw: base.totalRaw, // Usamos el total raw de la base (publicidad ya está incluido en otrosGastos o donde caiga en la base, o si es separado se suma aquí)
+            desglose: {
+                ...base.desglose,
+                publicidad: this.redondear(publicidad)
+            }
         };
     }
 
-    // ✅ DESGLOSAR GASTOS FINANCIEROS CON TC
     private static desglosarGastosFinancieros(gastos: GastoDetalle[], tipoCambio: number) {
         let interesesDesgravamen = 0;
         let comisionesBancarias = 0;
 
         gastos.forEach(gasto => {
-            const monto = this.convertirAUSD(gasto.monto, gasto.moneda, tipoCambio); // ✅ PASAR TC
-            const desc = gasto.descripcion.toLowerCase();
-            const cuenta = (gasto.cuenta_contable_codigo || '').toLowerCase();
+            try {
+                const montoUSD = this.convertirAUSD(gasto.monto_base, gasto.moneda, tipoCambio);
+                const desc = (gasto.descripcion || '').toLowerCase();
+                const cuenta = (gasto.cuenta_contable_codigo || '').toLowerCase();
 
-            if (desc.includes('interes') || desc.includes('desgravamen') || cuenta.startsWith('67')) {
-                interesesDesgravamen += monto;
-            } else if (desc.includes('comision') || desc.includes('bancari') || cuenta.startsWith('639')) {
-                comisionesBancarias += monto;
+                if (desc.includes('interes') || desc.includes('desgravamen') || cuenta.startsWith('67')) {
+                    interesesDesgravamen += montoUSD;
+                } else if (desc.includes('comision') || desc.includes('bancari') || cuenta.startsWith('639')) {
+                    comisionesBancarias += montoUSD;
+                }
+            } catch (error) {
+                console.warn(`⚠️ Error procesando gasto financiero ${gasto.id}:`, error);
             }
         });
 
+        const totalRaw = interesesDesgravamen + comisionesBancarias;
+
         return {
-            intereses_desgravamen: this.redondear(interesesDesgravamen),
-            comisiones_bancarias: this.redondear(comisionesBancarias),
-            total: interesesDesgravamen + comisionesBancarias
+            totalRaw,
+            desglose: {
+                intereses_desgravamen: this.redondear(interesesDesgravamen),
+                comisiones_bancarias: this.redondear(comisionesBancarias)
+            }
         };
     }
 
-    // ✅ CONVERTIR A USD CON TIPO DE CAMBIO DINÁMICO
-    private static convertirAUSD(monto: number, moneda: string, tipoCambio: number): number {
-        const valor = parseFloat(monto.toString()) || 0;
-        return moneda === 'USD' ? valor : valor / tipoCambio; // ✅ USAR TC DINÁMICO
-    }
-
-    private static redondear(valor: number): number {
-        return parseFloat(valor.toFixed(2));
-    }
-
-    private static calcularPorcentaje(valor: number, base: number): number {
-        if (base === 0) return 0;
-        return this.redondear((valor / base) * 100);
-    }
-
-    // ✅ CALCULAR RESUMEN DE MONEDAS CON TC DINÁMICO
     private static calcularResumenMonedas(
         importaciones: ImportacionDetalle[],
         exportaciones: ExportacionDetalle[],
         gastos: GastosPorClasificacion,
-        tipoCambio: number // ✅ NUEVO PARÁMETRO
+        tipoCambio: number
     ) {
         let totalUSD = 0;
         let totalPEN = 0;
 
+        // Exportaciones
         exportaciones.forEach(exp => {
-            const valorVenta = parseFloat(exp.valor_venta.toString()) || 0;
-            if (exp.moneda === 'USD') totalUSD += valorVenta;
-            else totalPEN += valorVenta;
+            const monto = this.validarNumero(exp.monto_base);
+            if (exp.moneda === 'USD') totalUSD += monto;
+            else totalPEN += monto;
         });
 
+        // Importaciones
         importaciones.forEach(imp => {
-            const valorCif = parseFloat(imp.valor_cif.toString()) || 0;
-            const dtaTotal = parseFloat(imp.dta_total.toString()) || 0;
-            totalUSD += valorCif + dtaTotal;
+            const monto = this.validarNumero(imp.valor_cif);
+            if (imp.moneda === 'USD') totalUSD += monto;
+            else totalPEN += monto;
         });
 
+        // Gastos
         const todosGastos = [
             ...gastos.operativos,
             ...gastos.administrativos,
@@ -527,23 +677,25 @@ export class AnalisisService {
         ];
 
         todosGastos.forEach(gasto => {
-            const monto = parseFloat(gasto.monto.toString()) || 0;
+            const monto = this.validarNumero(gasto.monto_base);
             if (gasto.moneda === 'USD') totalUSD += monto;
             else totalPEN += monto;
         });
 
         return {
-            total_usd: parseFloat(totalUSD.toFixed(2)),
-            total_pen: parseFloat(totalPEN.toFixed(2)),
-            tipo_cambio_sugerido: tipoCambio
+            total_usd: this.redondear(totalUSD),
+            total_pen: this.redondear(totalPEN),
+            tipo_cambio_usado: parseFloat(tipoCambio.toFixed(4))
         };
     }
+
+    // ===== RESTO DE MÉTODOS (COMPARATIVO, ASIENTO) =====
 
     static async obtenerComparativo(userId: string, limite = 10) {
         const sql = `
             SELECT id, nombre_caso, created_at
             FROM miaff.casos_de_estudio
-            WHERE user_id = $1
+            WHERE user_id = $1 AND estado != 'eliminado'
             ORDER BY created_at DESC
                 LIMIT $2
         `;
@@ -572,9 +724,10 @@ export class AnalisisService {
                         fecha_creacion: caso.created_at,
                         margen_neto: analysis.utilidad_neta.margen_neto_porcentaje,
                         utilidad_neta: analysis.utilidad_neta.utilidad_neta,
-                        ventas_totales: analysis.utilidad_bruta.ventas_totales
+                        ventas_totales: analysis.utilidad_bruta.ventas_totales_sin_igv
                     };
                 } catch (error) {
+                    console.warn(`⚠️ Error analizando caso ${caso.id}:`, error);
                     return {
                         caso_id: caso.id,
                         nombre_caso: caso.nombre_caso,
@@ -644,16 +797,16 @@ export class AnalisisService {
         totalHaber: number;
         moneda: string;
         tipo_cambio: number;
+        diferencia: number;
     }> {
         try {
-            console.log('🔍 ========================================');
+            console.log('\n🔍 ========================================');
             console.log('   INICIANDO ASIENTO CONTABLE CONSOLIDADO');
             console.log('========================================');
             console.log('   Caso ID:', casoId);
             console.log('   User ID:', userId);
             console.log('   Moneda Base:', monedaBase);
 
-            // ===== VALIDACIONES =====
             const casoExists = await this.validarCasoExiste(casoId, userId);
             if (!casoExists) {
                 throw new Error('Caso de estudio no encontrado');
@@ -662,11 +815,9 @@ export class AnalisisService {
             const casoInfo = await this.obtenerInfoCaso(casoId);
             console.log('✅ Caso validado:', casoInfo.nombre_caso);
 
-            // ===== TIPO DE CAMBIO =====
             const tipoCambio = await ExchangeRateService.getExchangeRate();
             console.log(`💱 Tipo de cambio: S/ ${tipoCambio.toFixed(4)}`);
 
-            // ===== MAPA DE CUENTAS CONSOLIDADO =====
             const cuentasMap = new Map<string, {
                 nombre_cuenta: string;
                 debe: number;
@@ -674,13 +825,10 @@ export class AnalisisService {
                 glosa: string;
             }>();
 
-            // ========================================
             // 1. IMPORTACIONES
-            // ========================================
             console.log('\n📦 PASO 1: Procesando IMPORTACIONES...');
-
             const importacionesSql = `
-                SELECT id, asiento_contable_json, descripcion_mercancia
+                SELECT id, asiento_contable_json, descripcion_mercancia, moneda
                 FROM miaff.importaciones
                 WHERE caso_estudio_id = $1 AND activo = 1
                 ORDER BY fecha_operacion, id
@@ -689,35 +837,28 @@ export class AnalisisService {
             console.log(`   📋 ${importaciones.length} importaciones encontradas`);
 
             importaciones.forEach((imp: any, idx: number) => {
-                console.log(`   [${idx + 1}/${importaciones.length}] Importación ID ${imp.id}`);
-
-                if (!imp.asiento_contable_json) {
-                    console.log(`      ⚠️  Sin asiento contable, saltando...`);
-                    return;
-                }
+                if (!imp.asiento_contable_json) return;
 
                 try {
                     const asiento = typeof imp.asiento_contable_json === 'string'
                         ? JSON.parse(imp.asiento_contable_json)
                         : imp.asiento_contable_json;
 
-                    if (!Array.isArray(asiento)) {
-                        console.log(`      ⚠️  asiento_contable_json no es array, saltando...`);
-                        return;
-                    }
-
-                    console.log(`      ✓ ${asiento.length} líneas en el asiento`);
+                    if (!Array.isArray(asiento)) return;
 
                     asiento.forEach((linea: any) => {
                         const cuenta = linea.cuenta || linea.codigo_cuenta;
                         const nombreCuenta = linea.nombre_cuenta || linea.denominacion;
-                        let debe = parseFloat(linea.debe) || 0;
-                        let haber = parseFloat(linea.haber) || 0;
+                        let debe = this.validarNumero(linea.debe);
+                        let haber = this.validarNumero(linea.haber);
 
-                        // ✅ CONVERTIR A MONEDA BASE (importaciones están en USD)
-                        if (monedaBase === 'PEN') {
+                        // Aquí usamos conversión RAW y redondeamos solo al final del proceso
+                        if (imp.moneda === 'USD' && monedaBase === 'PEN') {
                             debe = debe * tipoCambio;
                             haber = haber * tipoCambio;
+                        } else if (imp.moneda === 'PEN' && monedaBase === 'USD') {
+                            debe = debe / tipoCambio;
+                            haber = haber / tipoCambio;
                         }
 
                         const glosa = linea.glosa || `Importación - ${imp.descripcion_mercancia}`;
@@ -744,16 +885,21 @@ export class AnalisisService {
 
             console.log(`   ✅ Importaciones completadas. Cuentas: ${cuentasMap.size}`);
 
-            // ========================================
             // 2. EXPORTACIONES
-            // ========================================
             console.log('\n🚢 PASO 2: Procesando EXPORTACIONES...');
-
             const exportacionesSql = `
-                SELECT id, es_venta_nacional, descripcion_venta, valor_venta, moneda
-                FROM miaff.exportaciones
-                WHERE caso_estudio_id = $1 AND activo = true
-                ORDER BY fecha_operacion, id
+                SELECT 
+                    e.id, 
+                    e.es_venta_nacional, 
+                    e.descripcion_venta, 
+                    e.monto_base,
+                    e.monto_igv,
+                    e.moneda,
+                    tp.cuenta_contable as tipo_producto_cuenta
+                FROM miaff.exportaciones e
+                LEFT JOIN miaff.tipo_producto_venta tp ON tp.id = e.tipo_producto_id
+                WHERE e.caso_estudio_id = $1 AND e.activo = true
+                ORDER BY e.fecha_operacion, e.id
             `;
             const { rows: exportaciones } = await dbQuery<any>(exportacionesSql, [casoId]);
             console.log(`   📋 ${exportaciones.length} exportaciones encontradas`);
@@ -761,59 +907,50 @@ export class AnalisisService {
             if (exportaciones.length > 0) {
                 const reglas = await this._obtenerReglasContables();
                 const reglaClientes = reglas.get('clientes') || { cuenta: '12', nombre_cuenta: 'Clientes' };
-                const reglaVentas = reglas.get('ventas') || { cuenta: '70', nombre_cuenta: 'Ventas' };
                 const reglaIGV = reglas.get('igv') || { cuenta: '40111', nombre_cuenta: 'IGV – Cuenta propia' };
 
-                console.log('   🔧 Reglas aplicadas:');
-                console.log(`      - Clientes: ${reglaClientes.cuenta}`);
-                console.log(`      - Ventas: ${reglaVentas.cuenta}`);
-                console.log(`      - IGV: ${reglaIGV.cuenta}`);
-
                 exportaciones.forEach((exp: any, idx: number) => {
-                    console.log(`   [${idx + 1}/${exportaciones.length}] Exportación ID ${exp.id}`);
+                    const montoBase = this.validarNumero(exp.monto_base);
+                    const montoIgv = this.validarNumero(exp.monto_igv);
+                    const valorTotal = montoBase + montoIgv;
 
-                    const valorVenta = parseFloat(exp.valor_venta) || 0;
+                    let baseEnMonedaBase: number;
+                    let igvEnMonedaBase: number;
+                    let totalEnMonedaBase: number;
 
-                    // ✅ CONVERTIR A MONEDA BASE
-                    let valorEnMonedaBase: number;
+                    // Cálculos sin redondear intermedio
                     if (monedaBase === 'USD') {
-                        valorEnMonedaBase = exp.moneda === 'USD' ? valorVenta : valorVenta / tipoCambio;
+                        baseEnMonedaBase = exp.moneda === 'USD' ? montoBase : montoBase / tipoCambio;
+                        igvEnMonedaBase = exp.moneda === 'USD' ? montoIgv : montoIgv / tipoCambio;
+                        totalEnMonedaBase = exp.moneda === 'USD' ? valorTotal : valorTotal / tipoCambio;
                     } else {
-                        valorEnMonedaBase = exp.moneda === 'PEN' ? valorVenta : valorVenta * tipoCambio;
+                        baseEnMonedaBase = exp.moneda === 'PEN' ? montoBase : montoBase * tipoCambio;
+                        igvEnMonedaBase = exp.moneda === 'PEN' ? montoIgv : montoIgv * tipoCambio;
+                        totalEnMonedaBase = exp.moneda === 'PEN' ? valorTotal : valorTotal * tipoCambio;
                     }
 
-                    console.log(`      💰 Valor: ${valorVenta} ${exp.moneda} → ${valorEnMonedaBase.toFixed(2)} ${monedaBase}`);
+                    if (!cuentasMap.has(reglaClientes.cuenta)) {
+                        cuentasMap.set(reglaClientes.cuenta, {
+                            nombre_cuenta: reglaClientes.nombre_cuenta,
+                            debe: 0,
+                            haber: 0,
+                            glosa: exp.es_venta_nacional ? 'Ventas nacionales' : 'Exportaciones'
+                        });
+                    }
+                    cuentasMap.get(reglaClientes.cuenta)!.debe += totalEnMonedaBase;
 
-                    if (exp.es_venta_nacional) {
-                        // Venta nacional: incluye IGV (18%)
-                        const valorSinIgv = valorEnMonedaBase / 1.18;
-                        const igvVenta = valorEnMonedaBase - valorSinIgv;
+                    const cuentaVenta = exp.tipo_producto_cuenta || '7011';
+                    if (!cuentasMap.has(cuentaVenta)) {
+                        cuentasMap.set(cuentaVenta, {
+                            nombre_cuenta: 'Ventas',
+                            debe: 0,
+                            haber: 0,
+                            glosa: 'Ventas de mercaderías'
+                        });
+                    }
+                    cuentasMap.get(cuentaVenta)!.haber += baseEnMonedaBase;
 
-                        console.log(`      ✓ Venta Nacional: Base ${valorSinIgv.toFixed(2)} + IGV ${igvVenta.toFixed(2)}`);
-
-                        // 12 - Clientes (DEBE)
-                        if (!cuentasMap.has(reglaClientes.cuenta)) {
-                            cuentasMap.set(reglaClientes.cuenta, {
-                                nombre_cuenta: reglaClientes.nombre_cuenta,
-                                debe: 0,
-                                haber: 0,
-                                glosa: 'Ventas nacionales'
-                            });
-                        }
-                        cuentasMap.get(reglaClientes.cuenta)!.debe += valorEnMonedaBase;
-
-                        // 70 - Ventas (HABER)
-                        if (!cuentasMap.has(reglaVentas.cuenta)) {
-                            cuentasMap.set(reglaVentas.cuenta, {
-                                nombre_cuenta: reglaVentas.nombre_cuenta,
-                                debe: 0,
-                                haber: 0,
-                                glosa: 'Ventas de mercaderías'
-                            });
-                        }
-                        cuentasMap.get(reglaVentas.cuenta)!.haber += valorSinIgv;
-
-                        // 40111 - IGV (HABER)
+                    if (igvEnMonedaBase > 0) {
                         if (!cuentasMap.has(reglaIGV.cuenta)) {
                             cuentasMap.set(reglaIGV.cuenta, {
                                 nombre_cuenta: reglaIGV.nombre_cuenta,
@@ -822,86 +959,46 @@ export class AnalisisService {
                                 glosa: 'IGV de ventas'
                             });
                         }
-                        cuentasMap.get(reglaIGV.cuenta)!.haber += igvVenta;
-
-                    } else {
-                        // Exportación: sin IGV
-                        console.log(`      ✓ Exportación: ${valorEnMonedaBase.toFixed(2)} (sin IGV)`);
-
-                        // 12 - Clientes (DEBE)
-                        if (!cuentasMap.has(reglaClientes.cuenta)) {
-                            cuentasMap.set(reglaClientes.cuenta, {
-                                nombre_cuenta: reglaClientes.nombre_cuenta,
-                                debe: 0,
-                                haber: 0,
-                                glosa: 'Exportaciones'
-                            });
-                        }
-                        cuentasMap.get(reglaClientes.cuenta)!.debe += valorEnMonedaBase;
-
-                        // 70 - Ventas (HABER)
-                        if (!cuentasMap.has(reglaVentas.cuenta)) {
-                            cuentasMap.set(reglaVentas.cuenta, {
-                                nombre_cuenta: reglaVentas.nombre_cuenta,
-                                debe: 0,
-                                haber: 0,
-                                glosa: 'Ventas de exportación'
-                            });
-                        }
-                        cuentasMap.get(reglaVentas.cuenta)!.haber += valorEnMonedaBase;
+                        cuentasMap.get(reglaIGV.cuenta)!.haber += igvEnMonedaBase;
                     }
                 });
             }
 
             console.log(`   ✅ Exportaciones completadas. Cuentas: ${cuentasMap.size}`);
 
-            // ========================================
-            // 3. GASTOS (USANDO ASIENTO GENERADO)
-            // ========================================
+            // 3. GASTOS
             console.log('\n💸 PASO 3: Procesando GASTOS...');
-
             try {
-                // ✅ GENERAR ASIENTO DE GASTOS USANDO EL SERVICE
                 const asientoGastos = await GastoService.generarAsientoContable(userId, casoId);
                 console.log(`   📋 Asiento de gastos generado: ${asientoGastos.detalles.length} líneas`);
-                console.log(`   💰 Total Debe: ${asientoGastos.total_debe.toFixed(2)}`);
-                console.log(`   💰 Total Haber: ${asientoGastos.total_haber.toFixed(2)}`);
 
-                // ✅ DETECTAR LA MONEDA DEL ASIENTO DE GASTOS
                 const gastosMonedaSql = `
-                    SELECT DISTINCT g.moneda
+                    SELECT g.moneda, COUNT(*) as cantidad
                     FROM miaff.gastos g
-                    WHERE g.caso_estudio_id = $1
+                    WHERE g.caso_estudio_id = $1 AND g.activo = 1
+                    GROUP BY g.moneda
+                    ORDER BY cantidad DESC
+                    LIMIT 1
                 `;
-                const { rows: monedasGastos } = await dbQuery<{ moneda: string }>(gastosMonedaSql, [casoId]);
+                const { rows: monedasGastos } = await dbQuery<{ moneda: string; cantidad: string }>(gastosMonedaSql, [casoId]);
+                const monedaGastos = monedasGastos.length > 0 ? monedasGastos[0].moneda : 'PEN';
 
-                const monedaGastos = monedasGastos.length === 1 ? monedasGastos[0].moneda : 'PEN';
-                console.log(`   🔍 Moneda detectada en gastos: ${monedaGastos}`);
-
-                // ✅ PROCESAR CADA LÍNEA DEL ASIENTO DE GASTOS
-                asientoGastos.detalles.forEach((linea: any, idx: number) => {
+                asientoGastos.detalles.forEach((linea: any) => {
                     const cuenta = linea.codigo_cuenta;
                     const nombreCuenta = linea.denominacion;
-                    let debe = parseFloat(linea.debe.toString()) || 0;
-                    let haber = parseFloat(linea.haber.toString()) || 0;
+                    let debe = this.validarNumero(linea.debe);
+                    let haber = this.validarNumero(linea.haber);
 
-                    console.log(`   [${idx + 1}/${asientoGastos.detalles.length}] ${cuenta}: D=${debe.toFixed(2)} H=${haber.toFixed(2)}`);
-
-                    // ✅ CONVERTIR A MONEDA BASE
+                    // Conversión sin redondear
                     if (monedaGastos === 'PEN' && monedaBase === 'USD') {
                         debe = debe / tipoCambio;
                         haber = haber / tipoCambio;
-                        console.log(`      → Convertido a USD: D=${debe.toFixed(2)} H=${haber.toFixed(2)}`);
                     } else if (monedaGastos === 'USD' && monedaBase === 'PEN') {
                         debe = debe * tipoCambio;
                         haber = haber * tipoCambio;
-                        console.log(`      → Convertido a PEN: D=${debe.toFixed(2)} H=${haber.toFixed(2)}`);
                     }
 
-                    if (!cuenta) {
-                        console.log(`      ⚠️  Línea sin cuenta, saltando...`);
-                        return;
-                    }
+                    if (!cuenta) return;
 
                     if (!cuentasMap.has(cuenta)) {
                         cuentasMap.set(cuenta, {
@@ -924,56 +1021,54 @@ export class AnalisisService {
                 throw new Error(`Error procesando gastos: ${error.message}`);
             }
 
-            // ========================================
-            // 4. CONSOLIDACIÓN FINAL
-            // ========================================
+            // 4. CONSOLIDACIÓN
             console.log('\n📊 PASO 4: Consolidando asiento final...');
 
             const detalles = Array.from(cuentasMap.entries())
                 .map(([cuenta, data]) => ({
                     cuenta,
                     nombre_cuenta: data.nombre_cuenta,
-                    debe: parseFloat(data.debe.toFixed(2)),
-                    haber: parseFloat(data.haber.toFixed(2)),
+                    debe: data.debe,
+                    haber: data.haber,
                     glosa: data.glosa
                 }))
-                .filter(d => d.debe > 0 || d.haber > 0)
+                .filter(d => d.debe > 0.001 || d.haber > 0.001)
                 .sort((a, b) => a.cuenta.localeCompare(b.cuenta));
 
+            // Calculamos totales
             const totalDebe = detalles.reduce((sum, d) => sum + d.debe, 0);
             const totalHaber = detalles.reduce((sum, d) => sum + d.haber, 0);
-            const diferencia = Math.abs(totalDebe - totalHaber);
+            const diferencia = totalDebe - totalHaber;
 
-            console.log('\n========================================');
-            console.log('✅ ASIENTO CONSOLIDADO GENERADO');
-            console.log('========================================');
-            console.log(`📋 Total líneas: ${detalles.length}`);
+            // Redondeamos solo para el output final (2 decimales es estándar para contabilidad)
+            // Nota: Aquí sí usamos 2 decimales porque es un asiento contable formal, no un cálculo intermedio para conversión.
+            const detallesRedondeados = detalles.map(d => ({
+                ...d,
+                debe: parseFloat(d.debe.toFixed(2)),
+                haber: parseFloat(d.haber.toFixed(2))
+            }));
+
+            console.log('\n✅ ASIENTO CONSOLIDADO GENERADO');
+            console.log(`📋 Total líneas: ${detallesRedondeados.length}`);
             console.log(`💰 Total Debe: ${totalDebe.toFixed(2)} ${monedaBase}`);
             console.log(`💰 Total Haber: ${totalHaber.toFixed(2)} ${monedaBase}`);
             console.log(`⚖️  Diferencia: ${diferencia.toFixed(2)} ${monedaBase}`);
 
-            if (diferencia > 0.01) {
-                console.warn(`⚠️  ADVERTENCIA: Asiento descuadrado por ${diferencia.toFixed(2)}`);
-            }
-
-            console.log('========================================\n');
-
             return {
                 fecha: new Date().toISOString().split('T')[0],
                 descripcion: `Asiento consolidado del caso: ${casoInfo.nombre_caso}`,
-                detalles,
+                detalles: detallesRedondeados,
                 totalDebe: parseFloat(totalDebe.toFixed(2)),
                 totalHaber: parseFloat(totalHaber.toFixed(2)),
                 moneda: monedaBase,
-                tipo_cambio: parseFloat(tipoCambio.toFixed(4))
+                tipo_cambio: parseFloat(tipoCambio.toFixed(4)),
+                diferencia: parseFloat(diferencia.toFixed(2))
             };
+
         } catch (error: any) {
-            console.error('\n❌ ========================================');
-            console.error('   ERROR GENERAL EN ASIENTO CONSOLIDADO');
-            console.error('========================================');
+            console.error('\n❌ ERROR EN generarAsientoContableConsolidado');
             console.error('Mensaje:', error.message);
             console.error('Stack:', error.stack);
-            console.error('========================================\n');
             throw error;
         }
     }

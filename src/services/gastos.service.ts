@@ -16,6 +16,23 @@ import {
 
 export class GastoService {
 
+    // ====== FUNCIÓN HELPER PARA CALCULAR BASE E IGV ======
+    private static calcularMontos(monto: number, incluyeIgv: boolean): {
+        base: number;
+        igv: number;
+        total: number
+    } {
+        if (incluyeIgv) {
+            // Si incluye IGV: extraer base
+            const base = Math.round((monto / 1.18) * 100) / 100;
+            const igv = monto - base;
+            return { base, igv, total: monto };
+        } else {
+            // Si NO incluye IGV: el monto es la base
+            return { base: monto, igv: 0, total: monto };
+        }
+    }
+
     // ====== MÉTODOS BÁSICOS CRUD ======
 
     static async listarClasificaciones(): Promise<ClasificacionGastoDB[]> {
@@ -25,7 +42,8 @@ export class GastoService {
                 nombre,
                 cuenta_contable,
                 tipo_gasto,
-                calcula_igv
+                calcula_igv,
+                igv_opcional
             FROM miaff.clasificacion_gastos
             ORDER BY tipo_gasto, cuenta_contable;
         `;
@@ -42,32 +60,160 @@ export class GastoService {
             moneda,
             fecha_gasto,
             es_remuneracion,
-            tipo_pension
+            tipo_pension,
+            incluye_igv = null
         } = data;
 
+        // OBTENER CLASIFICACIÓN PARA VALIDAR
+        const clasificacionSql = `
+    SELECT calcula_igv, igv_opcional 
+    FROM miaff.clasificacion_gastos 
+    WHERE id = $1;
+  `;
+        const { rows: clasRows } = await dbQuery<{ calcula_igv: boolean; igv_opcional: boolean }>(
+            clasificacionSql,
+            [clasificacion_id]
+        );
+
+        if (clasRows.length === 0) {
+            throw new Error('Clasificación no encontrada');
+        }
+
+        const { calcula_igv, igv_opcional } = clasRows[0];
+
+        // VALIDAR Y CORREGIR incluye_igv según las reglas
+        let incluyeIgvFinal: boolean | null = null;
+
+        if (!calcula_igv) {
+            // NO calcula IGV → incluye_igv debe ser false/null
+            incluyeIgvFinal = false;
+        } else if (calcula_igv && !igv_opcional) {
+            // Calcula IGV OBLIGATORIO → incluye_igv SIEMPRE true
+            incluyeIgvFinal = true;
+        } else if (calcula_igv && igv_opcional) {
+            // Calcula IGV OPCIONAL → respetar lo que envió el usuario
+            incluyeIgvFinal = incluye_igv ?? false; // Si no envió nada, asumir false
+        }
+
+        // Calcular monto_base y monto_igv
+        const calculado = this.calcularMontos(monto, incluyeIgvFinal === true);
+
         const sql = `
-            INSERT INTO miaff.gastos (
-                user_id, caso_estudio_id, clasificacion_id, descripcion,
-                monto, moneda, fecha_gasto, es_remuneracion, tipo_pension, activo
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1)
-                RETURNING *;
-        `;
+    INSERT INTO miaff.gastos (
+      user_id, caso_estudio_id, clasificacion_id, descripcion,
+      monto, monto_base, monto_igv, moneda, fecha_gasto, 
+      es_remuneracion, tipo_pension, incluye_igv, activo
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1)
+    RETURNING *;
+  `;
 
         const params = [
             userId,
             caso_estudio_id,
             clasificacion_id,
             descripcion,
-            monto,
+            calculado.total,
+            calculado.base,
+            calculado.igv,
             moneda,
             fecha_gasto || new Date().toISOString().split('T')[0],
             es_remuneracion || false,
-            tipo_pension || null
+            tipo_pension || null,
+            incluyeIgvFinal
         ];
 
         const { rows } = await dbQuery<GastoDB>(sql, params);
         return rows[0];
     }
+
+    static async actualizar(
+        gastoId: number,
+        userId: string,
+        data: ActualizarGastoInput
+    ): Promise<GastoDB | null> {
+        const getSql = `
+    SELECT g.*, cg.calcula_igv, cg.igv_opcional
+    FROM miaff.gastos g
+    JOIN miaff.clasificacion_gastos cg ON g.clasificacion_id = cg.id
+    WHERE g.id = $1 AND g.user_id = $2 AND g.activo = 1;
+  `;
+        const { rows: currentRows } = await dbQuery<GastoDB & { calcula_igv: boolean; igv_opcional: boolean }>(
+            getSql,
+            [gastoId, userId]
+        );
+
+        if (currentRows.length === 0) {
+            return null;
+        }
+
+        const currentGasto = currentRows[0];
+        const mergedGasto = { ...currentGasto, ...data };
+
+        let finalTipoPension = mergedGasto.tipo_pension;
+        if (data.es_remuneracion === false) {
+            finalTipoPension = null;
+        }
+
+        // VALIDAR incluye_igv
+        let incluyeIgvFinal = mergedGasto.incluye_igv;
+
+        if (!currentGasto.calcula_igv) {
+            incluyeIgvFinal = false;
+        } else if (currentGasto.calcula_igv && !currentGasto.igv_opcional) {
+            incluyeIgvFinal = true;
+        } else if (currentGasto.calcula_igv && currentGasto.igv_opcional) {
+            incluyeIgvFinal = mergedGasto.incluye_igv ?? false;
+        }
+
+        // Recalcular montos
+        let montoBase = parseFloat(currentGasto.monto_base);
+        let montoIgv = parseFloat(currentGasto.monto_igv);
+        let montoTotal = parseFloat(currentGasto.monto);
+
+        if (data.monto !== undefined) {
+            const calculado = this.calcularMontos(data.monto, incluyeIgvFinal === true);
+            montoBase = calculado.base;
+            montoIgv = calculado.igv;
+            montoTotal = calculado.total;
+        }
+
+        const updateSql = `
+    UPDATE miaff.gastos SET
+      clasificacion_id = $1,
+      descripcion = $2,
+      monto = $3,
+      monto_base = $4,
+      monto_igv = $5,
+      moneda = $6,
+      fecha_gasto = $7,
+      es_remuneracion = $8,
+      tipo_pension = $9,
+      incluye_igv = $10,
+      updated_at = NOW()
+    WHERE
+      id = $11 AND user_id = $12 AND g.activo = 1
+    RETURNING *;
+  `;
+
+        const params = [
+            mergedGasto.clasificacion_id,
+            mergedGasto.descripcion,
+            montoTotal,
+            montoBase,
+            montoIgv,
+            mergedGasto.moneda,
+            mergedGasto.fecha_gasto,
+            mergedGasto.es_remuneracion,
+            finalTipoPension,
+            incluyeIgvFinal,
+            gastoId,
+            userId
+        ];
+
+        const { rows } = await dbQuery<GastoDB>(updateSql, params);
+        return rows[0];
+    }
+
 
     static async listarPorCaso(userId: string, casoEstudioId: number): Promise<GastoDB[]> {
         const sql = `
@@ -76,7 +222,8 @@ export class GastoService {
                 cg.nombre as nombre_clasificacion,
                 cg.cuenta_contable,
                 cg.tipo_gasto,
-                cg.calcula_igv
+                cg.calcula_igv,
+                cg.igv_opcional
             FROM
                 miaff.gastos g
                     JOIN
@@ -103,66 +250,7 @@ export class GastoService {
         return rows.length > 0;
     }
 
-    static async actualizar(
-        gastoId: number,
-        userId: string,
-        data: ActualizarGastoInput
-    ): Promise<GastoDB | null> {
 
-        // 1. Verificar que el gasto existe, pertenece al usuario y está activo
-        const getSql = `
-            SELECT * FROM miaff.gastos
-            WHERE id = $1 AND user_id = $2 AND activo = 1;
-        `;
-        const { rows: currentRows } = await dbQuery<GastoDB>(getSql, [gastoId, userId]);
-
-        if (currentRows.length === 0) {
-            return null; // No encontrado, no autorizado o ya inactivo
-        }
-
-        const currentGasto = currentRows[0];
-
-        // 2. Fusionar datos antiguos con los nuevos (los nuevos sobreescriben)
-        const mergedGasto = { ...currentGasto, ...data };
-
-        // 3. Lógica de negocio: si se actualiza a 'es_remuneracion: false',
-        //    debemos anular el tipo de pensión.
-        let finalTipoPension = mergedGasto.tipo_pension;
-        if (data.es_remuneracion === false) {
-            finalTipoPension = null;
-        }
-
-        // 4. Construir y ejecutar la consulta UPDATE
-        const updateSql = `
-            UPDATE miaff.gastos SET
-                                    clasificacion_id = $1,
-                                    descripcion = $2,
-                                    monto = $3,
-                                    moneda = $4,
-                                    fecha_gasto = $5,
-                                    es_remuneracion = $6,
-                                    tipo_pension = $7,
-                                    updated_at = NOW()
-            WHERE
-                id = $8 AND user_id = $9 AND activo = 1
-                RETURNING *;
-        `;
-
-        const params = [
-            mergedGasto.clasificacion_id,
-            mergedGasto.descripcion,
-            mergedGasto.monto,
-            mergedGasto.moneda,
-            mergedGasto.fecha_gasto,
-            mergedGasto.es_remuneracion,
-            finalTipoPension,
-            gastoId,
-            userId
-        ];
-
-        const { rows } = await dbQuery<GastoDB>(updateSql, params);
-        return rows[0];
-    }
 
     // ====== MÉTODOS DE CÁLCULO TRIBUTARIO ======
 
@@ -172,64 +260,50 @@ export class GastoService {
     ): Promise<CalculoTributario> {
         const gastos = await this.listarPorCaso(userId, casoEstudioId);
 
-        // Separar remuneraciones (cuentas 621 y 627)
         const remuneraciones = gastos.filter(g =>
-            g.cuenta_contable?.startsWith('621') || g.cuenta_contable === '621.1' ||
-            g.cuenta_contable === '621.2' || g.cuenta_contable === '621.3'
+            g.cuenta_contable?.startsWith('621')
         );
 
-        // Gastos con IGV (desde 631 hasta 659, excluyendo 627)
         const gastosConIgv = gastos.filter(g =>
-                g.calcula_igv === true && g.cuenta_contable && (
-                    g.cuenta_contable.startsWith('631') ||
-                    g.cuenta_contable.startsWith('632') ||
-                    g.cuenta_contable.startsWith('633') ||
-                    g.cuenta_contable.startsWith('634') ||
-                    g.cuenta_contable.startsWith('635') ||
-                    g.cuenta_contable.startsWith('636') ||
-                    g.cuenta_contable.startsWith('637') ||
-                    g.cuenta_contable.startsWith('639') ||
-                    g.cuenta_contable.startsWith('651') ||
-                    g.cuenta_contable.startsWith('659')
-                )
+            parseFloat(g.monto_igv) > 0 &&
+            !g.cuenta_contable?.startsWith('621') &&
+            !g.cuenta_contable?.startsWith('627') &&
+            !g.cuenta_contable?.startsWith('671')
         );
 
-        // Gastos financieros (cuenta 671)
         const gastosFinancieros = gastos.filter(g =>
             g.cuenta_contable?.startsWith('671')
         );
 
-        // Calcular totales de remuneraciones
         const totalRemuneraciones = remuneraciones.reduce((sum, g) =>
-            sum + parseFloat(g.monto), 0
+            sum + parseFloat(g.monto_base), 0
         );
 
-        // ESSALUD: 9% sobre remuneraciones (cuenta 627)
         const essalud = totalRemuneraciones * 0.09;
 
-        // Calcular ONP y AFP por tipo de pensión
         const remuneracionesONP = remuneraciones
             .filter(g => g.tipo_pension === 'ONP')
-            .reduce((sum, g) => sum + parseFloat(g.monto), 0);
+            .reduce((sum, g) => sum + parseFloat(g.monto_base), 0);
 
         const remuneracionesAFP = remuneraciones
             .filter(g => g.tipo_pension === 'AFP')
-            .reduce((sum, g) => sum + parseFloat(g.monto), 0);
+            .reduce((sum, g) => sum + parseFloat(g.monto_base), 0);
 
-        const onp = remuneracionesONP * 0.13; // 13% ONP
-        const afp = remuneracionesAFP * 0.1137; // 11.37% AFP
+        const onp = remuneracionesONP * 0.13;
+        const afp = remuneracionesAFP * 0.1137;
 
-        // Remuneraciones por pagar = Total remuneraciones - ONP - AFP
         const remuneracionesPorPagar = totalRemuneraciones - onp - afp;
 
-        // Calcular IGV sobre otros gastos
         const totalGastosConIgv = gastosConIgv.reduce((sum, g) =>
-            sum + parseFloat(g.monto), 0
+            sum + parseFloat(g.monto_base), 0
         );
-        const igv = totalGastosConIgv * 0.18; // 18% IGV
+
+        const igv = gastosConIgv.reduce((sum, g) =>
+            sum + parseFloat(g.monto_igv), 0
+        );
+
         const facturasPorPagar = totalGastosConIgv + igv;
 
-        // Gastos financieros (sin IGV)
         const totalGastosFinancieros = gastosFinancieros.reduce((sum, g) =>
             sum + parseFloat(g.monto), 0
         );
@@ -247,37 +321,80 @@ export class GastoService {
         };
     }
 
-    // ====== ASIENTO CONTABLE ======
+    // Método privado para calcular tributos de gastos ya filtrados
+    private static calcularTributosDeGastos(gastos: GastoDB[]): CalculoTributario {
+        const remuneraciones = gastos.filter(g => g.cuenta_contable?.startsWith('621'));
+        const gastosConIgv = gastos.filter(g =>
+            parseFloat(g.monto_igv) > 0 &&
+            !g.cuenta_contable?.startsWith('621') &&
+            !g.cuenta_contable?.startsWith('627') &&
+            !g.cuenta_contable?.startsWith('671')
+        );
+        const gastosFinancieros = gastos.filter(g => g.cuenta_contable?.startsWith('671'));
+
+        const totalRemuneraciones = remuneraciones.reduce((sum, g) => sum + parseFloat(g.monto_base), 0);
+        const essalud = totalRemuneraciones * 0.09;
+
+        const remuneracionesONP = remuneraciones.filter(g => g.tipo_pension === 'ONP')
+            .reduce((sum, g) => sum + parseFloat(g.monto_base), 0);
+        const remuneracionesAFP = remuneraciones.filter(g => g.tipo_pension === 'AFP')
+            .reduce((sum, g) => sum + parseFloat(g.monto_base), 0);
+
+        const onp = remuneracionesONP * 0.13;
+        const afp = remuneracionesAFP * 0.1137;
+        const remuneracionesPorPagar = totalRemuneraciones - onp - afp;
+
+        const totalGastosConIgv = gastosConIgv.reduce((sum, g) => sum + parseFloat(g.monto_base), 0);
+        const igv = gastosConIgv.reduce((sum, g) => sum + parseFloat(g.monto_igv), 0);
+        const facturasPorPagar = totalGastosConIgv + igv;
+
+        const totalGastosFinancieros = gastosFinancieros.reduce((sum, g) => sum + parseFloat(g.monto), 0);
+
+        return {
+            total_remuneraciones: totalRemuneraciones,
+            essalud, onp, afp,
+            remuneraciones_por_pagar: remuneracionesPorPagar,
+            total_gastos_con_igv: totalGastosConIgv,
+            igv,
+            facturas_por_pagar: facturasPorPagar,
+            total_gastos_financieros: totalGastosFinancieros
+        };
+    }
+
+    // ====== ASIENTO CONTABLE POR CASO ======
 
     static async generarAsientoContable(
         userId: string,
-        casoEstudioId: number
+        casoEstudioId: number,
+        tipoGasto?: string
     ): Promise<AsientoContableCompleto> {
-        const gastos = await this.listarPorCaso(userId, casoEstudioId);
-        const tributos = await this.calcularTributosGastos(userId, casoEstudioId);
+        const todosLosGastos = await this.listarPorCaso(userId, casoEstudioId);
+
+        const gastos = tipoGasto
+            ? todosLosGastos.filter(g => g.tipo_gasto === tipoGasto)
+            : todosLosGastos;
+
+        const tributos = this.calcularTributosDeGastos(gastos);
 
         const detalles: AsientoContableDetalle[] = [];
 
-        // Agrupar gastos por cuenta contable para el DEBE
+        // Agrupar gastos por cuenta contable
         const gastosPorCuenta = new Map<string, { denominacion: string; total: number }>();
 
         gastos.forEach(gasto => {
             if (!gasto.cuenta_contable) return;
-
             const key = gasto.cuenta_contable;
             if (!gastosPorCuenta.has(key)) {
-                gastosPorCuenta.set(key, {
-                    denominacion: gasto.nombre_clasificacion || '',
-                    total: 0
-                });
+                gastosPorCuenta.set(key, { denominacion: gasto.nombre_clasificacion || '', total: 0 });
             }
             const actual = gastosPorCuenta.get(key)!;
-            actual.total += parseFloat(gasto.monto);
+            actual.total += parseFloat(gasto.monto_base);
         });
 
-        // DEBE: Todas las cuentas de gasto (clase 6)
+        // DEBE: Cuentas de gasto
         gastosPorCuenta.forEach((valor, codigo) => {
-            // 1. Añade el gasto principal (ej: 621.1 por 1200)
+            if (valor.total === 0) return;
+
             detalles.push({
                 codigo_cuenta: codigo,
                 denominacion: valor.denominacion,
@@ -285,17 +402,12 @@ export class GastoService {
                 haber: 0
             });
 
-            // Si es una cuenta de remuneración (621.x), calcula y añade
-            // automáticamente su gasto ESSALUD (627.x) al DEBE.
+            // ESSALUD para remuneraciones
             if (codigo.startsWith('621')) {
-                const essaludGasto = valor.total * 0.09; // 9%
-
-                // Si el gasto es 0, no añadir la línea de ESSALUD
+                const essaludGasto = valor.total * 0.09;
                 if (essaludGasto === 0) return;
 
-                const essaludCodigo = codigo.replace('621', '627'); // '621.1' -> '627.1'
-
-                // Asigna la denominación correcta según tu memoria
+                const essaludCodigo = codigo.replace('621', '627');
                 let essaludDenominacion = 'Seguridad, previsión social (ESSALUD)';
                 if (codigo.endsWith('.1')) essaludDenominacion += ' operativos';
                 else if (codigo.endsWith('.2')) essaludDenominacion += ' administrativas';
@@ -310,7 +422,7 @@ export class GastoService {
             }
         });
 
-        // DEBE: IGV (40111)
+        // DEBE: IGV
         if (tributos.igv > 0) {
             detalles.push({
                 codigo_cuenta: '40111',
@@ -320,7 +432,7 @@ export class GastoService {
             });
         }
 
-        // HABER: Tributos y cuentas por pagar
+        // HABER: Tributos laborales
         if (tributos.essalud > 0) {
             detalles.push({
                 codigo_cuenta: '4031',
@@ -357,6 +469,7 @@ export class GastoService {
             });
         }
 
+        // HABER: Facturas con IGV
         if (tributos.facturas_por_pagar > 0) {
             detalles.push({
                 codigo_cuenta: '4211',
@@ -366,6 +479,7 @@ export class GastoService {
             });
         }
 
+        // HABER: Gastos financieros
         if (tributos.total_gastos_financieros > 0) {
             detalles.push({
                 codigo_cuenta: '101',
@@ -375,12 +489,186 @@ export class GastoService {
             });
         }
 
+        // ✅ NUEVO: HABER para gastos SIN IGV (que no son remuneraciones ni financieros)
+        const gastosSinIgvNiEspeciales = gastos.filter(g =>
+            parseFloat(g.monto_igv) === 0 &&
+            !g.cuenta_contable?.startsWith('621') &&
+            !g.cuenta_contable?.startsWith('627') &&
+            !g.cuenta_contable?.startsWith('671')
+        );
+
+        const totalGastosSinIgv = gastosSinIgvNiEspeciales.reduce((sum, g) =>
+            sum + parseFloat(g.monto_base), 0
+        );
+
+        if (totalGastosSinIgv > 0) {
+            detalles.push({
+                codigo_cuenta: '469',
+                denominacion: 'Otras cuentas por pagar diversas',
+                debe: 0,
+                haber: totalGastosSinIgv
+            });
+        }
+
         const totalDebe = detalles.reduce((sum, d) => sum + d.debe, 0);
         const totalHaber = detalles.reduce((sum, d) => sum + d.haber, 0);
 
         return {
             fecha: new Date().toISOString().split('T')[0],
-            descripcion: `Asiento por gastos del caso de estudio #${casoEstudioId}`,
+            descripcion: `Asiento por gastos ${tipoGasto ? tipoGasto.toLowerCase() + 's' : ''} del caso #${casoEstudioId}`,
+            detalles,
+            total_debe: totalDebe,
+            total_haber: totalHaber
+        };
+    }
+
+    // ====== ASIENTO CONTABLE POR GASTO INDIVIDUAL ======
+
+// ====== ASIENTO CONTABLE POR GASTO INDIVIDUAL ======
+
+    static async generarAsientoContablePorGasto(
+        userId: string,
+        gastoId: number
+    ): Promise<AsientoContableCompleto> {
+        const getSql = `
+            SELECT
+                g.*,
+                cg.nombre as nombre_clasificacion,
+                cg.cuenta_contable,
+                cg.tipo_gasto
+            FROM
+                miaff.gastos g
+                    JOIN
+                miaff.clasificacion_gastos cg ON g.clasificacion_id = cg.id
+            WHERE
+                g.id = $1 AND g.user_id = $2 AND g.activo = 1;
+        `;
+        const { rows } = await dbQuery<GastoDB>(getSql, [gastoId, userId]);
+
+        if (rows.length === 0) {
+            throw new Error('Gasto no encontrado');
+        }
+
+        const gasto = rows[0];
+        const detalles: AsientoContableDetalle[] = [];
+
+        const montoBase = parseFloat(gasto.monto_base);
+        const montoIgv = parseFloat(gasto.monto_igv);
+        const esRemuneracion = gasto.cuenta_contable?.startsWith('621');
+        const esFinanciero = gasto.cuenta_contable?.startsWith('671');
+
+        // DEBE: Cuenta de gasto
+        detalles.push({
+            codigo_cuenta: gasto.cuenta_contable || '',
+            denominacion: gasto.nombre_clasificacion || gasto.descripcion,
+            debe: montoBase,
+            haber: 0
+        });
+
+        // ===== CASO 1: REMUNERACIONES =====
+        if (esRemuneracion) {
+            const essalud = montoBase * 0.09;
+            const essaludCodigo = gasto.cuenta_contable!.replace('621', '627');
+
+            let essaludDenominacion = 'Seguridad, previsión social (ESSALUD)';
+            if (gasto.cuenta_contable?.endsWith('.1')) essaludDenominacion += ' operativos';
+            else if (gasto.cuenta_contable?.endsWith('.2')) essaludDenominacion += ' administrativas';
+            else if (gasto.cuenta_contable?.endsWith('.3')) essaludDenominacion += ' de ventas';
+
+            // DEBE: ESSALUD
+            detalles.push({
+                codigo_cuenta: essaludCodigo,
+                denominacion: essaludDenominacion,
+                debe: essalud,
+                haber: 0
+            });
+
+            // HABER: ESSALUD por pagar
+            detalles.push({
+                codigo_cuenta: '4031',
+                denominacion: 'Instituciones públicas - ESSALUD',
+                debe: 0,
+                haber: essalud
+            });
+
+            // HABER: ONP o AFP
+            if (gasto.tipo_pension === 'ONP') {
+                const onp = montoBase * 0.13;
+                detalles.push({
+                    codigo_cuenta: '4032',
+                    denominacion: 'Instituciones públicas - ONP',
+                    debe: 0,
+                    haber: onp
+                });
+            } else if (gasto.tipo_pension === 'AFP') {
+                const afp = montoBase * 0.1137;
+                detalles.push({
+                    codigo_cuenta: '407',
+                    denominacion: 'Administradoras de fondos de pensiones',
+                    debe: 0,
+                    haber: afp
+                });
+            }
+
+            // HABER: Remuneración por pagar (neta)
+            const descuentos = gasto.tipo_pension === 'ONP'
+                ? montoBase * 0.13
+                : gasto.tipo_pension === 'AFP'
+                    ? montoBase * 0.1137
+                    : 0;
+
+            detalles.push({
+                codigo_cuenta: '411',
+                denominacion: 'Remuneraciones por pagar',
+                debe: 0,
+                haber: montoBase - descuentos
+            });
+        }
+        // ===== CASO 2: GASTOS FINANCIEROS =====
+        else if (esFinanciero) {
+            // HABER: Caja y bancos (gastos financieros se pagan en efectivo)
+            detalles.push({
+                codigo_cuenta: '101',
+                denominacion: 'Caja y bancos',
+                debe: 0,
+                haber: montoBase // Financieros no tienen IGV
+            });
+        }
+        // ===== CASO 3: GASTOS CON IGV =====
+        else if (montoIgv > 0) {
+            // DEBE: IGV
+            detalles.push({
+                codigo_cuenta: '40111',
+                denominacion: 'IGV - Cuenta propia',
+                debe: montoIgv,
+                haber: 0
+            });
+
+            // HABER: Facturas por pagar (base + IGV)
+            detalles.push({
+                codigo_cuenta: '4211',
+                denominacion: 'Facturas, boletas y otros comprobantes por pagar',
+                debe: 0,
+                haber: montoBase + montoIgv
+            });
+        }
+        // ===== CASO 4: GASTOS SIN IGV (ej: alquileres, servicios sin factura) =====
+        else {
+            // HABER: Otras cuentas por pagar
+            detalles.push({
+                codigo_cuenta: '469',
+                denominacion: 'Otras cuentas por pagar diversas',
+                debe: 0,
+                haber: montoBase
+            });
+        }
+
+        const totalDebe = detalles.reduce((sum, d) => sum + d.debe, 0);
+        const totalHaber = detalles.reduce((sum, d) => sum + d.haber, 0);
+
+        return {
+            fecha: gasto.fecha_gasto,
+            descripcion: `Asiento del gasto: ${gasto.descripcion}`,
             detalles,
             total_debe: totalDebe,
             total_haber: totalHaber
@@ -422,44 +710,41 @@ export class GastoService {
     }
 
     // ====== DATOS FINANCIEROS ======
-
+    // (Sin cambios - código igual que antes)
     static async guardarDatosFinancieros(
         userId: string,
         data: DatosFinancierosInput
     ): Promise<DatosFinancieros> {
         const { caso_estudio_id, activos_totales, patrimonio, moneda } = data;
 
-        // Verificar si ya existen datos para este caso de estudio
         const existeSql = `
-      SELECT id FROM miaff.datos_financieros 
-      WHERE user_id = $1 AND caso_estudio_id = $2;
-    `;
+            SELECT id FROM miaff.datos_financieros 
+            WHERE user_id = $1 AND caso_estudio_id = $2;
+        `;
         const { rows: existentes } = await dbQuery<{ id: number }>(
             existeSql,
             [userId, caso_estudio_id]
         );
 
         if (existentes.length > 0) {
-            // Actualizar
             const updateSql = `
-        UPDATE miaff.datos_financieros 
-        SET activos_totales = $1, patrimonio = $2, moneda = $3, updated_at = NOW()
-        WHERE user_id = $4 AND caso_estudio_id = $5
-        RETURNING *;
-      `;
+                UPDATE miaff.datos_financieros 
+                SET activos_totales = $1, patrimonio = $2, moneda = $3, updated_at = NOW()
+                WHERE user_id = $4 AND caso_estudio_id = $5
+                RETURNING *;
+            `;
             const { rows } = await dbQuery<DatosFinancieros>(
                 updateSql,
                 [activos_totales, patrimonio, moneda, userId, caso_estudio_id]
             );
             return rows[0];
         } else {
-            // Insertar
             const insertSql = `
-        INSERT INTO miaff.datos_financieros 
-        (user_id, caso_estudio_id, activos_totales, patrimonio, moneda)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING *;
-      `;
+                INSERT INTO miaff.datos_financieros 
+                (user_id, caso_estudio_id, activos_totales, patrimonio, moneda)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING *;
+            `;
             const { rows } = await dbQuery<DatosFinancieros>(
                 insertSql,
                 [userId, caso_estudio_id, activos_totales, patrimonio, moneda]
@@ -473,61 +758,49 @@ export class GastoService {
         casoEstudioId: number
     ): Promise<DatosFinancieros | null> {
         const sql = `
-      SELECT * FROM miaff.datos_financieros 
-      WHERE user_id = $1 AND caso_estudio_id = $2;
-    `;
+            SELECT * FROM miaff.datos_financieros 
+            WHERE user_id = $1 AND caso_estudio_id = $2;
+        `;
         const { rows } = await dbQuery<DatosFinancieros>(sql, [userId, casoEstudioId]);
         return rows[0] || null;
     }
-
-    // ====== RATIOS FINANCIEROS ======
 
     static async calcularRatiosFinancieros(
         userId: string,
         casoEstudioId: number
     ): Promise<RatiosFinancieros | null> {
-        // Obtener datos financieros
         const datosFinancieros = await this.obtenerDatosFinancieros(userId, casoEstudioId);
-        if (!datosFinancieros) {
-            return null;
-        }
+        if (!datosFinancieros) return null;
 
-        // Obtener ventas totales del módulo de ventas (asumiendo que existe)
         const ventasSql = `
-      SELECT COALESCE(SUM(monto_sin_igv), 0) as total_ventas
-      FROM miaff.ventas 
-      WHERE user_id = $1 AND caso_estudio_id = $2;
-    `;
+            SELECT COALESCE(SUM(monto_sin_igv), 0) as total_ventas
+            FROM miaff.ventas 
+            WHERE user_id = $1 AND caso_estudio_id = $2;
+        `;
         const { rows: ventasRows } = await dbQuery<{ total_ventas: string }>(
             ventasSql,
             [userId, casoEstudioId]
         );
         const ventasTotalesSinIgv = parseFloat(ventasRows[0]?.total_ventas || '0');
 
-        // Obtener costos de producción (asumiendo módulo de producción)
         const costosSql = `
-      SELECT COALESCE(SUM(monto), 0) as total_costos
-      FROM miaff.costos_produccion 
-      WHERE user_id = $1 AND caso_estudio_id = $2;
-    `;
+            SELECT COALESCE(SUM(monto), 0) as total_costos
+            FROM miaff.costos_produccion 
+            WHERE user_id = $1 AND caso_estudio_id = $2;
+        `;
         const { rows: costosRows } = await dbQuery<{ total_costos: string }>(
             costosSql,
             [userId, casoEstudioId]
         );
         const totalCostos = parseFloat(costosRows[0]?.total_costos || '0');
 
-        // Obtener gastos totales (solo activos)
         const gastos = await this.listarPorCaso(userId, casoEstudioId);
-        const totalGastos = gastos.reduce((sum, g) => sum + parseFloat(g.monto), 0);
+        const totalGastos = gastos.reduce((sum, g) => sum + parseFloat(g.monto_base), 0);
 
-        // Calcular utilidades
         const utilidadBruta = ventasTotalesSinIgv - totalCostos;
         const utilidadOperativa = utilidadBruta - totalGastos;
-
-        // Utilidad neta (asumiendo impuesto a la renta del 29.5%)
         const utilidadNeta = utilidadOperativa * 0.705;
 
-        // Calcular márgenes
         const margenBrutoPorcentaje = ventasTotalesSinIgv > 0
             ? (utilidadBruta / ventasTotalesSinIgv) * 100
             : 0;
@@ -538,7 +811,6 @@ export class GastoService {
             ? (utilidadNeta / ventasTotalesSinIgv) * 100
             : 0;
 
-        // Calcular ratios de rentabilidad
         const activosTotales = parseFloat(datosFinancieros.activos_totales);
         const patrimonio = parseFloat(datosFinancieros.patrimonio);
 

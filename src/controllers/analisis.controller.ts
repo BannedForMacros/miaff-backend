@@ -1,8 +1,7 @@
-// controllers/analisis.controller.ts
+// controllers/analisis.controller.ts - VERSIÓN CORREGIDA COMPLETA
 
 import { Request, Response } from 'express';
 import { AnalisisService } from '../services/analisis.service';
-// ✅ IMPORTADO: Servicio de tipo de cambio
 import { ExchangeRateService } from '../services/exchangeRate.service';
 import {
     obtenerAnalisisSchema,
@@ -58,7 +57,8 @@ export class AnalisisController {
                     }
                 },
                 tiene_estado_resultados: !!analysis.estado_resultados,
-                tiene_ratios: !!analysis.ratios_financieros
+                tiene_ratios: !!analysis.ratios_financieros,
+                ventas_sin_igv: analysis.utilidad_bruta.ventas_totales_sin_igv
             });
 
             res.status(200).json({
@@ -70,6 +70,7 @@ export class AnalisisController {
                     incluye_detalles: queryParams.incluir_detalles,
                     incluye_estado_resultados: true,
                     incluye_ratios_financieros: true,
+                    tipo_cambio_usado: analysis.resumen_monedas.tipo_cambio_usado,
                     timestamp: new Date().toISOString()
                 }
             });
@@ -126,7 +127,7 @@ export class AnalisisController {
                 false
             );
 
-            // ✅ ACTUALIZADO: Incluir ratios financieros completos
+            // ✅ ACTUALIZADO: Solo ventas SIN IGV
             const ratios = {
                 caso_estudio_id: analysis.caso_estudio_id,
                 nombre_caso: analysis.nombre_caso,
@@ -135,8 +136,8 @@ export class AnalisisController {
                     margen_operativo: analysis.ratios_financieros.margen_operativo,
                     margen_neto: analysis.ratios_financieros.margen_neto,
                     ros: analysis.ratios_financieros.ros,
-                    roa: analysis.ratios_financieros.roa, // null si no hay inputs
-                    roe: analysis.ratios_financieros.roe  // null si no hay inputs
+                    roa: analysis.ratios_financieros.roa,
+                    roe: analysis.ratios_financieros.roe
                 },
                 utilidades: {
                     bruta: analysis.utilidad_bruta.utilidad_bruta,
@@ -144,9 +145,9 @@ export class AnalisisController {
                     neta: analysis.utilidad_neta.utilidad_neta
                 },
                 ventas: {
-                    total_con_igv: analysis.utilidad_bruta.ventas_totales,
-                    total_sin_igv: analysis.utilidad_bruta.ventas_totales_sin_igv
+                    total_sin_igv: analysis.utilidad_bruta.ventas_totales_sin_igv // ✅ SOLO SIN IGV
                 },
+                costo_ventas: analysis.utilidad_bruta.costo_ventas, // ✅ NUEVO
                 resumen_monedas: analysis.resumen_monedas,
                 nota: 'ROA y ROE requieren inputs de Activos Totales y Patrimonio (calculados en frontend)'
             };
@@ -185,7 +186,7 @@ export class AnalisisController {
         }
     }
 
-    // ✅ NUEVO: Obtener Estado de Resultados
+    // ✅ ACTUALIZADO: Estado de Resultados
     static async obtenerEstadoResultados(req: Request, res: Response): Promise<void> {
         try {
             const { caso_id } = obtenerAnalisisSchema.parse(req.params);
@@ -205,17 +206,19 @@ export class AnalisisController {
                 false
             );
 
-            // Extraer solo el Estado de Resultados
+            // ✅ Extraer Estado de Resultados con ventas SIN IGV
             const estadoResultados = {
                 caso_estudio_id: analysis.caso_estudio_id,
                 nombre_caso: analysis.nombre_caso,
                 estado_resultados: analysis.estado_resultados,
                 resumen: {
-                    ventas_sin_igv: analysis.estado_resultados.ventas.total_ventas_sin_igv,
+                    ventas_sin_igv: analysis.estado_resultados.ventas.total_ventas_sin_igv, // ✅ SIN IGV
+                    costo_ventas: analysis.estado_resultados.costo_ventas.total_costo_ventas,
                     utilidad_bruta: analysis.estado_resultados.utilidad_bruta,
                     utilidad_operativa: analysis.estado_resultados.utilidad_operativa,
                     utilidad_neta: analysis.estado_resultados.utilidad_neta
-                }
+                },
+                tipo_cambio_usado: analysis.resumen_monedas.tipo_cambio_usado
             };
 
             res.status(200).json({
@@ -252,6 +255,7 @@ export class AnalisisController {
         }
     }
 
+    // ✅ ACTUALIZADO: Resumen Operacional
     static async obtenerResumenOperacional(req: Request, res: Response): Promise<void> {
         try {
             const { caso_id } = obtenerAnalisisSchema.parse(req.params);
@@ -265,36 +269,38 @@ export class AnalisisController {
                 return;
             }
 
-            // --- INICIO DE CAMBIOS ---
-
-            // 1. Obtener el tipo de cambio primero
             console.log('🔄 Obteniendo tipo de cambio para resumen...');
             const exchangeRate = await ExchangeRateService.getExchangeRate();
-            console.log(`✅ Tasa de cambio obtenida: ${exchangeRate}`);
+            console.log(`✅ Tasa de cambio obtenida: ${exchangeRate.toFixed(4)}`);
 
-            // 2. Obtener el análisis (como estaba)
             const analysis = await AnalisisService.obtenerAnalisisRentabilidad(
                 caso_id,
                 userId,
                 true
             );
 
-            // 3. Construir el resumen usando la variable 'exchangeRate'
-            // ✅ ACTUALIZADO: Usar ventas_totales_sin_igv y costo_ventas
+            // ✅ CORREGIDO: Usar monto_base (sin IGV) en vez de valor_venta
             const summary = {
                 caso_estudio_id: analysis.caso_estudio_id,
                 nombre_caso: analysis.nombre_caso,
                 resumen_operaciones: {
                     importaciones: {
                         cantidad: analysis.detalles.importaciones.length,
-                        valor_total_cif: analysis.detalles.importaciones.reduce((sum, imp) => sum + imp.valor_cif, 0),
-                        tributos_totales: analysis.detalles.importaciones.reduce((sum, imp) => sum + imp.dta_total, 0)
+                        valor_total_cif: analysis.detalles.importaciones.reduce((sum, imp) => {
+                            const cifUSD = imp.moneda === 'USD' ? imp.valor_cif : imp.valor_cif / exchangeRate;
+                            return sum + cifUSD;
+                        }, 0),
+                        tributos_totales: analysis.detalles.importaciones.reduce((sum, imp) => {
+                            const dtaUSD = imp.moneda === 'USD' ? imp.dta_total : imp.dta_total / exchangeRate;
+                            return sum + dtaUSD;
+                        }, 0)
                     },
                     exportaciones: {
                         cantidad: analysis.detalles.exportaciones.length,
-                        // 👇 CAMBIO REALIZADO: Usar 'exchangeRate' en lugar de 3.75
-                        valor_total_ventas: analysis.detalles.exportaciones.reduce((sum, exp) => {
-                            return sum + (exp.moneda === 'USD' ? exp.valor_venta : exp.valor_venta / exchangeRate);
+                        // ✅ USAR monto_base (sin IGV)
+                        valor_total_ventas_sin_igv: analysis.detalles.exportaciones.reduce((sum, exp) => {
+                            const baseUSD = exp.moneda === 'USD' ? exp.monto_base : exp.monto_base / exchangeRate;
+                            return sum + baseUSD;
                         }, 0),
                         ventas_nacionales: analysis.detalles.exportaciones.filter(exp => exp.es_venta_nacional).length,
                         exportaciones_internacionales: analysis.detalles.exportaciones.filter(exp => !exp.es_venta_nacional).length
@@ -303,7 +309,24 @@ export class AnalisisController {
                         total_operativos: analysis.detalles.gastos.operativos.length,
                         total_administrativos: analysis.detalles.gastos.administrativos.length,
                         total_ventas: analysis.detalles.gastos.ventas.length,
-                        total_financieros: analysis.detalles.gastos.financieros.length
+                        total_financieros: analysis.detalles.gastos.financieros.length,
+                        // ✅ SUMAR monto_base (sin IGV)
+                        monto_total_operativos: analysis.detalles.gastos.operativos.reduce((sum, g) => {
+                            const baseUSD = g.moneda === 'USD' ? g.monto_base : g.monto_base / exchangeRate;
+                            return sum + baseUSD;
+                        }, 0),
+                        monto_total_administrativos: analysis.detalles.gastos.administrativos.reduce((sum, g) => {
+                            const baseUSD = g.moneda === 'USD' ? g.monto_base : g.monto_base / exchangeRate;
+                            return sum + baseUSD;
+                        }, 0),
+                        monto_total_ventas: analysis.detalles.gastos.ventas.reduce((sum, g) => {
+                            const baseUSD = g.moneda === 'USD' ? g.monto_base : g.monto_base / exchangeRate;
+                            return sum + baseUSD;
+                        }, 0),
+                        monto_total_financieros: analysis.detalles.gastos.financieros.reduce((sum, g) => {
+                            const baseUSD = g.moneda === 'USD' ? g.monto_base : g.monto_base / exchangeRate;
+                            return sum + baseUSD;
+                        }, 0)
                     }
                 },
                 indicadores_clave: {
@@ -316,10 +339,9 @@ export class AnalisisController {
                     margen_bruto: analysis.ratios_financieros.margen_bruto.toFixed(2),
                     margen_operativo: analysis.ratios_financieros.margen_operativo.toFixed(2),
                     margen_neto: analysis.ratios_financieros.margen_neto.toFixed(2)
-                }
+                },
+                tipo_cambio_usado: exchangeRate
             };
-
-            // --- FIN DE CAMBIOS ---
 
             res.status(200).json({
                 success: true,
@@ -398,10 +420,8 @@ export class AnalisisController {
             });
         }
     }
-// controllers/analisis.controller.ts - AGREGAR AL FINAL DE LA CLASE
 
-// controllers/analisis.controller.ts - MODIFICAR EL MÉTODO
-
+    // ✅ ACTUALIZADO: Asiento Consolidado con diferencia expuesta
     static async obtenerAsientoContableConsolidado(req: Request, res: Response): Promise<void> {
         console.log('🚀 INICIANDO obtenerAsientoContableConsolidado');
 
@@ -429,6 +449,12 @@ export class AnalisisController {
             console.log('📈 Total de líneas:', asiento.detalles.length);
             console.log(`💰 Total Debe: ${asiento.totalDebe} ${asiento.moneda}`);
             console.log(`💰 Total Haber: ${asiento.totalHaber} ${asiento.moneda}`);
+            console.log(`⚖️  Diferencia: ${asiento.diferencia} ${asiento.moneda}`);
+
+            // ✅ ADVERTENCIA SI HAY DIFERENCIA
+            if (Math.abs(asiento.diferencia) > 0.01) {
+                console.warn(`⚠️  ADVERTENCIA: Asiento descuadrado por ${asiento.diferencia}`);
+            }
 
             res.status(200).json({
                 success: true,
@@ -437,7 +463,8 @@ export class AnalisisController {
                 metadata: {
                     caso_id,
                     total_lineas: asiento.detalles.length,
-                    diferencia: Math.abs(asiento.totalDebe - asiento.totalHaber),
+                    diferencia: asiento.diferencia, // ✅ EXPONER DIFERENCIA
+                    esta_balanceado: Math.abs(asiento.diferencia) <= 0.01,
                     moneda: asiento.moneda,
                     tipo_cambio: asiento.tipo_cambio,
                     timestamp: new Date().toISOString()

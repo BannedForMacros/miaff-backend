@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const createImportacionSchema = z.object({
     caso_estudio_id: z.number({ required_error: 'El caso de estudio es obligatorio' }).int().positive(),
+    tipo_mercancia_id: z.number({ required_error: 'El tipo de mercancía es obligatorio' }).int().positive(), // NUEVO
     subpartida_hs10: z.string({ required_error: 'La subpartida es obligatoria' }).length(10, 'La subpartida debe tener 10 dígitos'),
     descripcion_mercancia: z.string({ required_error: 'La descripción es obligatoria' }).min(3, 'La descripción debe tener al menos 3 caracteres'),
     moneda: z.enum(['USD', 'PEN'], { required_error: 'La moneda debe ser USD o PEN' }),
@@ -22,6 +23,7 @@ export const createImportacionSchema = z.object({
 
 export const updateImportacionSchema = z.object({
     caso_estudio_id: z.number().int().positive().optional(),
+    tipo_mercancia_id: z.number().int().positive().optional(), // NUEVO
     subpartida_hs10: z.string().length(10, 'La subpartida debe tener 10 dígitos').optional(),
     descripcion_mercancia: z.string().min(3, 'La descripción debe tener al menos 3 caracteres').optional(),
     moneda: z.enum(['USD', 'PEN']).optional(),

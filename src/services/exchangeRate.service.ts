@@ -1,5 +1,3 @@
-// services/exchangeRate.service.ts - VERSIÓN FINAL SIN ERRORES
-
 import {
     DecolectaExchangeRateResponse,
     CachedExchangeRate,
@@ -9,7 +7,7 @@ import {
 
 export class ExchangeRateService {
     private static DECOLECTA_TOKEN = process.env.EXPO_PUBLIC_DECOLECTA_TOKEN;
-    private static FALLBACK_RATE = 3.39;
+    private static FALLBACK_RATE = 3.371;
     private static cache: CachedExchangeRate | null = null;
     private static CACHE_DURATION = 1000 * 60 * 60 * 24; // 24 horas
 
@@ -17,13 +15,11 @@ export class ExchangeRateService {
      * Obtiene el tipo de cambio actual (con caché de 24 horas)
      */
     static async getExchangeRate(): Promise<number> {
-        // Verificar caché
         if (this.isCacheValid()) {
             console.log('✅ Usando tipo de cambio desde caché:', this.cache!.rate);
             return this.cache!.rate;
         }
 
-        // Si no hay caché válido, obtener desde API
         try {
             console.log('🌐 Obteniendo tipo de cambio desde API Decolecta...');
             const rate = await this.fetchExchangeRate();
@@ -65,16 +61,13 @@ export class ExchangeRateService {
         }
     }
 
-    /**
-     * Obtiene el tipo de cambio desde la API de Decolecta
-     */
     private static async fetchExchangeRate(): Promise<number> {
         const data = await this.fetchExchangeRateData();
         return data.rate;
     }
 
     /**
-     * Obtiene los datos completos desde la API
+     * Obtiene los datos completos desde la API y PARSEA los strings a números
      */
     private static async fetchExchangeRateData(): Promise<CachedExchangeRate> {
         if (!this.DECOLECTA_TOKEN) {
@@ -95,48 +88,54 @@ export class ExchangeRateService {
             throw new Error(`API respondió con estado ${response.status}`);
         }
 
-        // ✅ SOLUCIÓN: Aserción de tipo explícita
-        const data = await response.json() as DecolectaExchangeRateResponse;
+        // Obtenemos la respuesta cruda (sin forzar el tipo todavía para evitar errores de lógica)
+        const rawData = await response.json();
 
-        // Validar que tenga los campos requeridos
-        if (typeof data.sell_price !== 'number' || typeof data.buy_price !== 'number') {
-            throw new Error('Respuesta de API inválida: sell_price o buy_price no son números');
+        // 1. CONVERSIÓN EXPLÍCITA:
+        // Aunque la API devuelva "3.75" (string), aquí lo forzamos a número float.
+        // @ts-ignore
+        const sellPrice = parseFloat(String(rawData.sell_price));
+        // @ts-ignore
+        const buyPrice = parseFloat(String(rawData.buy_price));
+
+        // 2. VALIDACIÓN NUMÉRICA:
+        // Usamos isNaN para verificar si la conversión fue exitosa
+        if (isNaN(sellPrice) || isNaN(buyPrice)) {
+            // @ts-ignore
+            throw new Error(`Respuesta de API inválida: sell_price (${rawData.sell_price}) o buy_price (${rawData.buy_price}) no son convertibles a número`);
         }
 
-        if (!data.date) {
+        // @ts-ignore
+        if (!rawData.date) {
             throw new Error('Respuesta de API inválida: falta campo date');
         }
 
-        // Crear objeto de caché
+        // Crear objeto de caché con los números ya limpios
+        // @ts-ignore
+
         const cacheData: CachedExchangeRate = {
-            rate: data.sell_price,
-            buyPrice: data.buy_price,
-            date: data.date,
+            rate: sellPrice,
+            buyPrice: buyPrice,
+            // @ts-ignore
+            date: rawData.date,
             timestamp: Date.now()
         };
 
-        // Guardar en caché
         this.cache = cacheData;
-
         return cacheData;
     }
 
-    /**
-     * Verifica si el caché es válido
-     */
     private static isCacheValid(): boolean {
         if (!this.cache) return false;
 
         const now = Date.now();
         const cacheAge = now - this.cache.timestamp;
 
-        // Verificar que no haya expirado (24 horas)
         if (cacheAge > this.CACHE_DURATION) {
             console.log('⏰ Caché de tipo de cambio expirado');
             return false;
         }
 
-        // Verificar que sea del mismo día
         const today = new Date().toISOString().split('T')[0];
         if (this.cache.date !== today) {
             console.log('📅 Caché de tipo de cambio de otro día');
@@ -146,17 +145,11 @@ export class ExchangeRateService {
         return true;
     }
 
-    /**
-     * Invalida el caché manualmente
-     */
     static invalidateCache(): void {
         this.cache = null;
         console.log('🗑️ Caché de tipo de cambio invalidado');
     }
 
-    /**
-     * Convierte un monto de una moneda a otra
-     */
     static async convert(
         amount: number,
         from: Currency,

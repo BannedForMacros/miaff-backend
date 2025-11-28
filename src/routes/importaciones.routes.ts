@@ -6,6 +6,19 @@ const router = Router();
 
 /**
  * @openapi
+ * /api/importaciones/tipos-mercancia:
+ *   get:
+ *     tags: [Importaciones]
+ *     summary: Obtiene todos los tipos de mercancía disponibles
+ *     responses:
+ *       '200':
+ *         description: Lista de tipos de mercancía
+ */
+router.get('/tipos-mercancia', requireAuth, ImportacionController.listarTiposMercancia);
+
+
+/**
+ * @openapi
  * components:
  *   schemas:
  *     Importacion:
