@@ -1,11 +1,11 @@
 // ============================================
-// src/services/quiz.service.ts
+// src/services/quiz.service.ts (BACKEND)
 // ============================================
 
 import { dbQuery } from '../db';
 import type { QuestionTypeA, QuestionTemplateTypeB, GeneratedQuestionB, QuizAttempt } from '../types/quiz.types';
 
-// Generador de números aleatorios determinístico
+// Generador de números aleatorios determinístico (mejorado)
 function xorshift32(seed: number) {
     let x = seed >>> 0;
     return () => {
@@ -16,7 +16,7 @@ function xorshift32(seed: number) {
     };
 }
 
-// Función para barajar array
+// Función para barajar array con Fisher-Yates
 function shuffleArray<T>(arr: T[], rng: () => number): T[] {
     const result = [...arr];
     for (let i = result.length - 1; i > 0; i--) {
@@ -27,7 +27,7 @@ function shuffleArray<T>(arr: T[], rng: () => number): T[] {
 }
 
 export class QuizService {
-    // Obtener preguntas tipo A aleatorias
+    // ✅ Obtener preguntas tipo A aleatorias CON SHUFFLE COMPLETO
     async getRandomQuestionsTypeA(count: number, seed: number): Promise<any[]> {
         const { rows } = await dbQuery<QuestionTypeA>(
             `SELECT id, code, prompt, choice_a, choice_b, choice_c, choice_d, correct_answer, explanation, tags
@@ -39,11 +39,13 @@ export class QuizService {
             throw new Error('No hay preguntas tipo A disponibles');
         }
 
+        // ✅ SHUFFLE DE PREGUNTAS: para que salgan en orden aleatorio
         const rng = xorshift32(seed);
-        const shuffled = shuffleArray(rows, rng);
-        const selected = shuffled.slice(0, Math.min(count, shuffled.length));
+        const shuffledQuestions = shuffleArray(rows, rng);
+        const selected = shuffledQuestions.slice(0, Math.min(count, shuffledQuestions.length));
 
         return selected.map((q) => {
+            // ✅ SHUFFLE DE OPCIONES: para que las opciones también estén en orden aleatorio
             const choices = [
                 { key: 'A', text: q.choice_a },
                 { key: 'B', text: q.choice_b },
@@ -51,9 +53,11 @@ export class QuizService {
                 { key: 'D', text: q.choice_d },
             ];
 
-            const shuffledChoices = shuffleArray(choices, rng);
+            // Crear nuevo RNG para cada pregunta
+            const choiceRng = xorshift32(seed + parseInt(q.id.replace(/-/g, '').slice(0, 8), 16));
+            const shuffledChoices = shuffleArray(choices, choiceRng);
 
-            // FIX: usar findIndex en lugar de acceso directo
+            // Encontrar la nueva key de la respuesta correcta
             const correctIndex = ['A', 'B', 'C', 'D'].indexOf(q.correct_answer);
             const correctText = choices[correctIndex].text;
             const correctChoice = shuffledChoices.find((c) => c.text === correctText);
@@ -75,9 +79,9 @@ export class QuizService {
     async generateQuestionsTypeB(count: number, seed: number): Promise<GeneratedQuestionB[]> {
         const { rows } = await dbQuery<QuestionTemplateTypeB>(
             `SELECT id, code, name, calculation_config
-       FROM miaff.question_templates_type_b
-       WHERE is_active = true
-       LIMIT 1`
+             FROM miaff.question_templates_type_b
+             WHERE is_active = true
+                 LIMIT 1`
         );
 
         if (rows.length === 0) {
@@ -122,32 +126,21 @@ export class QuizService {
 
     // Calcular XP ganado
     calculateXP(correctAnswers: number, totalQuestions: number, isApproved: boolean): number {
-        // OPCIÓN 1: XP por cada respuesta correcta (10 XP por pregunta)
         const xpPerQuestion = 10;
         const baseXP = correctAnswers * xpPerQuestion;
-
-        // Bonus si aprueba (>= 70%)
         const approvalBonus = isApproved ? 50 : 0;
-
-        // Bonus por perfección (100%)
         const perfectBonus = correctAnswers === totalQuestions ? 100 : 0;
 
         return baseXP + approvalBonus + perfectBonus;
-
-        // OPCIÓN 2: Solo XP si aprueba el examen
-        // if (!isApproved) return 0;
-        // const baseXP = totalQuestions * 15;
-        // const perfectBonus = correctAnswers === totalQuestions ? 100 : 0;
-        // return baseXP + perfectBonus;
     }
 
     // Crear intento de quiz
-    async createQuizAttempt(userId: string, quizType: 'A' | 'B', totalQuestions: number): Promise<string> {
+    async createQuizAttempt(userId: string, quizType: 'A' | 'B', totalQuestions: number, seed: number): Promise<string> {
         const { rows } = await dbQuery<{ id: string }>(
-            `INSERT INTO miaff.quiz_attempts (user_id, quiz_type, total_questions, correct_answers, score_percentage, is_approved, xp_earned)
-       VALUES ($1, $2, $3, 0, 0, false, 0)
-       RETURNING id`,
-            [userId, quizType, totalQuestions]
+            `INSERT INTO miaff.quiz_attempts (user_id, quiz_type, total_questions, correct_answers, score_percentage, is_approved, xp_earned, seed)
+             VALUES ($1, $2, $3, 0, 0, false, 0, $4)
+                 RETURNING id`,
+            [userId, quizType, totalQuestions, seed]
         );
 
         return rows[0].id;
@@ -166,7 +159,6 @@ export class QuizService {
             is_correct: boolean;
         }>
     ): Promise<{ xp_earned: number; is_approved: boolean; score_percentage: number }> {
-        // 1. Verificar que el intento pertenezca al usuario
         const { rows: attempts } = await dbQuery<QuizAttempt>(
             `SELECT * FROM miaff.quiz_attempts WHERE id = $1 AND user_id = $2`,
             [attemptId, userId]
@@ -182,11 +174,10 @@ export class QuizService {
             throw new Error('Este quiz ya fue completado');
         }
 
-        // 2. Guardar todas las respuestas
         for (const answer of answers) {
             await dbQuery(
                 `INSERT INTO miaff.quiz_answers (attempt_id, question_order, question_type, question_data, user_answer, correct_answer, is_correct)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
                 [
                     attemptId,
                     answer.question_order,
@@ -199,33 +190,30 @@ export class QuizService {
             );
         }
 
-        // 3. Calcular resultados
         const correctAnswers = answers.filter((a) => a.is_correct).length;
         const totalQuestions = answers.length;
         const scorePercentage = Math.round((correctAnswers / totalQuestions) * 100);
         const isApproved = scorePercentage >= 70;
         const xpEarned = this.calculateXP(correctAnswers, totalQuestions, isApproved);
 
-        // 4. Actualizar intento de quiz
         await dbQuery(
             `UPDATE miaff.quiz_attempts
-       SET correct_answers = $1,
-           score_percentage = $2,
-           is_approved = $3,
-           xp_earned = $4,
-           completed_at = NOW()
-       WHERE id = $5`,
+             SET correct_answers = $1,
+                 score_percentage = $2,
+                 is_approved = $3,
+                 xp_earned = $4,
+                 completed_at = NOW()
+             WHERE id = $5`,
             [correctAnswers, scorePercentage, isApproved, xpEarned, attemptId]
         );
 
-        // 5. Actualizar perfil del usuario
         await dbQuery(
             `UPDATE miaff.user_profile
-       SET xp = xp + $1,
-           total_quizzes = total_quizzes + 1,
-           total_approved = total_approved + $2,
-           updated_at = NOW()
-       WHERE user_id = $3`,
+             SET xp = xp + $1,
+                 total_quizzes = total_quizzes + 1,
+                 total_approved = total_approved + $2,
+                 updated_at = NOW()
+             WHERE user_id = $3`,
             [xpEarned, isApproved ? 1 : 0, userId]
         );
 
@@ -236,9 +224,9 @@ export class QuizService {
     async getUserQuizHistory(userId: string, limit = 10): Promise<QuizAttempt[]> {
         const { rows } = await dbQuery<QuizAttempt>(
             `SELECT * FROM miaff.quiz_attempts
-       WHERE user_id = $1
-       ORDER BY created_at DESC
-       LIMIT $2`,
+             WHERE user_id = $1
+             ORDER BY created_at DESC
+                 LIMIT $2`,
             [userId, limit]
         );
 
@@ -248,15 +236,15 @@ export class QuizService {
     // Obtener estadísticas del usuario
     async getUserStats(userId: string) {
         const { rows } = await dbQuery(
-            `SELECT 
-         COUNT(*) as total_quizzes,
-         COUNT(*) FILTER (WHERE is_approved = true) as total_approved,
-         COUNT(*) FILTER (WHERE quiz_type = 'A') as quizzes_type_a,
-         COUNT(*) FILTER (WHERE quiz_type = 'B') as quizzes_type_b,
-         ROUND(AVG(score_percentage), 2) as avg_score,
-         MAX(score_percentage) as best_score
-       FROM miaff.quiz_attempts
-       WHERE user_id = $1 AND completed_at IS NOT NULL`,
+            `SELECT
+                 COUNT(*) as total_quizzes,
+                 COUNT(*) FILTER (WHERE is_approved = true) as total_approved,
+                 COUNT(*) FILTER (WHERE quiz_type = 'A') as quizzes_type_a,
+                 COUNT(*) FILTER (WHERE quiz_type = 'B') as quizzes_type_b,
+                 ROUND(AVG(score_percentage), 2) as avg_score,
+                 MAX(score_percentage) as best_score
+             FROM miaff.quiz_attempts
+             WHERE user_id = $1 AND completed_at IS NOT NULL`,
             [userId]
         );
 
