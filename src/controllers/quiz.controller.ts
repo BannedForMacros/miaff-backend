@@ -1,55 +1,107 @@
 // ============================================
-// src/controllers/quiz.controller.ts
+// src/controllers/quiz.controller.ts (BACKEND)
 // ============================================
 
 import { Request, Response } from 'express';
 import { QuizService } from '../services/quiz.service';
-import { startQuizSchema, completeQuizSchema } from '../validators/quiz.validators';
-import type { JwtUser } from '../utils/token';
-import {dbQuery} from "../db";
+import { z } from 'zod';
 
 const quizService = new QuizService();
 
+// ✅ Extender el tipo Request para incluir user
+interface AuthenticatedRequest extends Request {
+    user?: {
+        id: string;
+        email?: string;
+        [key: string]: any;
+    };
+}
+
 export class QuizController {
-    // POST /api/quiz/start
-    async startQuiz(req: Request, res: Response) {
+    /**
+     * POST /api/quiz/start
+     * Inicia un nuevo quiz con preguntas aleatorias
+     */
+    async startQuiz(req: AuthenticatedRequest, res: Response) {
         try {
-            const user = (req as any).user as JwtUser;
-            const body = startQuizSchema.parse(req.body);
+            const schema = z.object({
+                quiz_type: z.enum(['A', 'B']),
+                question_count: z.number().int().min(1).max(50),
+                seed: z.number().int().optional(),
+            });
 
-            const seed = body.seed || Date.now();
-            let questions: any[];
+            const validated = schema.parse(req.body);
+            const userId = req.user?.id;
 
-            if (body.quiz_type === 'A') {
-                questions = await quizService.getRandomQuestionsTypeA(body.question_count, seed);
-            } else {
-                questions = await quizService.generateQuestionsTypeB(body.question_count, seed);
+            if (!userId) {
+                return res.status(401).json({ error: 'No autenticado' });
             }
 
-            const attemptId = await quizService.createQuizAttempt(user.sub, body.quiz_type, body.question_count);
+            // ✅ Genera seed aleatorio si no se proporciona
+            const seed = validated.seed || Math.floor(Math.random() * 1000000) + Date.now();
 
-            res.json({
+            // Crear attempt en BD con el seed
+            const attemptId = await quizService.createQuizAttempt(
+                userId,
+                validated.quiz_type,
+                validated.question_count,
+                seed
+            );
+
+            // Generar preguntas según el tipo
+            let questions;
+            if (validated.quiz_type === 'A') {
+                questions = await quizService.getRandomQuestionsTypeA(validated.question_count, seed);
+            } else {
+                questions = await quizService.generateQuestionsTypeB(validated.question_count, seed);
+            }
+
+            return res.json({
                 attempt_id: attemptId,
-                quiz_type: body.quiz_type,
+                quiz_type: validated.quiz_type,
                 questions,
                 seed,
             });
         } catch (error: any) {
-            console.error('Error starting quiz:', error);
-            res.status(400).json({ error: error.message });
+            console.error('[Quiz Controller] Error en startQuiz:', error);
+            if (error instanceof z.ZodError) {
+                return res.status(400).json({ error: 'Datos inválidos', details: error.errors });
+            }
+            return res.status(500).json({ error: error.message || 'Error al iniciar quiz' });
         }
     }
 
-    // POST /api/quiz/complete
-    async completeQuiz(req: Request, res: Response) {
+    /**
+     * POST /api/quiz/complete
+     * Completa el quiz y calcula el puntaje
+     */
+    async completeQuiz(req: AuthenticatedRequest, res: Response) {
         try {
-            const user = (req as any).user as JwtUser;
-            const body = completeQuizSchema.parse(req.body);
+            const schema = z.object({
+                attempt_id: z.string().uuid(),
+                answers: z.array(
+                    z.object({
+                        question_order: z.number().int().min(0),
+                        question_type: z.enum(['A', 'B']),
+                        question_data: z.any(), // Sin "?" - es obligatorio
+                        user_answer: z.string(),
+                        correct_answer: z.string(),
+                        is_correct: z.boolean(),
+                    })
+                ),
+            });
+
+            const validated = schema.parse(req.body);
+            const userId = req.user?.id;
+
+            if (!userId) {
+                return res.status(401).json({ error: 'No autenticado' });
+            }
 
             const result = await quizService.completeQuiz(
-                body.attempt_id,
-                user.sub,
-                body.answers as Array<{
+                validated.attempt_id,
+                userId,
+                validated.answers as Array<{
                     question_order: number;
                     question_type: 'A' | 'B';
                     question_data: any;
@@ -59,53 +111,79 @@ export class QuizController {
                 }>
             );
 
-            res.json({
+            return res.json({
                 success: true,
                 ...result,
             });
         } catch (error: any) {
-            console.error('Error completing quiz:', error);
-            res.status(400).json({ error: error.message });
+            console.error('[Quiz Controller] Error en completeQuiz:', error);
+            if (error instanceof z.ZodError) {
+                return res.status(400).json({ error: 'Datos inválidos', details: error.errors });
+            }
+            return res.status(400).json({ error: error.message || 'Error al completar quiz' });
         }
     }
 
-    // GET /api/quiz/history
-    async getHistory(req: Request, res: Response) {
+    /**
+     * GET /api/quiz/history
+     * Obtiene el historial de quizzes del usuario
+     */
+    async getHistory(req: AuthenticatedRequest, res: Response) {
         try {
-            const user = (req as any).user as JwtUser;
+            const userId = req.user?.id;
+            if (!userId) {
+                return res.status(401).json({ error: 'No autenticado' });
+            }
+
             const limit = parseInt(req.query.limit as string) || 10;
+            const history = await quizService.getUserQuizHistory(userId, limit);
 
-            const history = await quizService.getUserQuizHistory(user.sub, limit);
-
-            res.json({ history });
+            return res.json({ history });
         } catch (error: any) {
-            console.error('Error getting quiz history:', error);
-            res.status(500).json({ error: error.message });
+            console.error('[Quiz Controller] Error en getHistory:', error);
+            return res.status(500).json({ error: 'Error al obtener historial' });
         }
     }
 
-    // GET /api/quiz/stats
-    async getStats(req: Request, res: Response) {
+    /**
+     * GET /api/quiz/stats
+     * Obtiene estadísticas del usuario
+     */
+    async getStats(req: AuthenticatedRequest, res: Response) {
         try {
-            const user = (req as any).user as JwtUser;
-            const stats = await quizService.getUserStats(user.sub);
+            const userId = req.user?.id;
+            if (!userId) {
+                return res.status(401).json({ error: 'No autenticado' });
+            }
 
-            res.json({ stats });
+            const stats = await quizService.getUserStats(userId);
+
+            return res.json({ stats });
         } catch (error: any) {
-            console.error('Error getting quiz stats:', error);
-            res.status(500).json({ error: error.message });
+            console.error('[Quiz Controller] Error en getStats:', error);
+            return res.status(500).json({ error: 'Error al obtener estadísticas' });
         }
     }
 
-    // GET /api/quiz/questions/type-a (Admin: ver todas las preguntas)
-    async getQuestionsTypeA(req: Request, res: Response) {
+    /**
+     * GET /api/quiz/questions/type-a
+     * Obtiene todas las preguntas tipo A (admin)
+     */
+    async getQuestionsTypeA(req: AuthenticatedRequest, res: Response) {
         try {
-            const { rows } = await dbQuery(
-                `SELECT * FROM miaff.questions_type_a ORDER BY code ASC`
-            );
-            res.json({ questions: rows });
+            const userId = req.user?.id;
+            if (!userId) {
+                return res.status(401).json({ error: 'No autenticado' });
+            }
+
+            // Generar un seed temporal solo para obtener las preguntas
+            const tempSeed = Date.now();
+            const questions = await quizService.getRandomQuestionsTypeA(100, tempSeed);
+
+            return res.json({ questions });
         } catch (error: any) {
-            res.status(500).json({ error: error.message });
+            console.error('[Quiz Controller] Error en getQuestionsTypeA:', error);
+            return res.status(500).json({ error: 'Error al obtener preguntas' });
         }
     }
 }
