@@ -401,7 +401,7 @@ export class AnalisisService {
                 const tipoGasto = (gasto.clasificacion_nombre || '').toUpperCase();
                 if (tipoGasto === 'OPERATIVO') gastosPorClasificacion.operativos.push(gasto);
                 else if (tipoGasto === 'ADMINISTRATIVO') gastosPorClasificacion.administrativos.push(gasto);
-                else if (tipoGasto === 'VENTAS') gastosPorClasificacion.ventas.push(gasto);
+                else if (tipoGasto === 'VENTA') gastosPorClasificacion.ventas.push(gasto);
                 else if (tipoGasto === 'FINANCIERO') gastosPorClasificacion.financieros.push(gasto);
             });
 

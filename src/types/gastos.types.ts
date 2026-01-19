@@ -67,6 +67,7 @@ export interface AsientoContableDetalle {
     denominacion: string;
     debe: number;
     haber: number;
+    moneda: string;
 }
 
 export interface AsientoContableCompleto {

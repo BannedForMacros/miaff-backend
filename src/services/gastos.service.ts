@@ -191,7 +191,7 @@ export class GastoService {
       incluye_igv = $10,
       updated_at = NOW()
     WHERE
-      id = $11 AND user_id = $12 AND g.activo = 1
+      id = $11 AND user_id = $12 AND activo = 1
     RETURNING *;
   `;
 
@@ -374,35 +374,47 @@ export class GastoService {
             ? todosLosGastos.filter(g => g.tipo_gasto === tipoGasto)
             : todosLosGastos;
 
-        const tributos = this.calcularTributosDeGastos(gastos);
+        const detallesDebeParcial: AsientoContableDetalle[] = [];
+        const detallesHaberParcial: AsientoContableDetalle[] = [];
 
-        const detalles: AsientoContableDetalle[] = [];
+        // 🔥 DETECTAR MONEDAS
+        const monedasUnicas = new Set(gastos.map(g => g.moneda));
 
-        // Agrupar gastos por cuenta contable
-        const gastosPorCuenta = new Map<string, { denominacion: string; total: number }>();
+        // ========== PASO 1: DEBE - Agrupar gastos por cuenta y moneda ==========
+        const gastosPorCuentaYMoneda = new Map<string, {
+            denominacion: string;
+            total: number;
+            moneda: string
+        }>();
 
         gastos.forEach(gasto => {
             if (!gasto.cuenta_contable) return;
-            const key = gasto.cuenta_contable;
-            if (!gastosPorCuenta.has(key)) {
-                gastosPorCuenta.set(key, { denominacion: gasto.nombre_clasificacion || '', total: 0 });
+            const key = `${gasto.cuenta_contable}-${gasto.moneda}`;
+            if (!gastosPorCuentaYMoneda.has(key)) {
+                gastosPorCuentaYMoneda.set(key, {
+                    denominacion: gasto.nombre_clasificacion || '',
+                    total: 0,
+                    moneda: gasto.moneda
+                });
             }
-            const actual = gastosPorCuenta.get(key)!;
+            const actual = gastosPorCuentaYMoneda.get(key)!;
             actual.total += parseFloat(gasto.monto_base);
         });
 
-        // DEBE: Cuentas de gasto
-        gastosPorCuenta.forEach((valor, codigo) => {
+        // Agregar al DEBE
+        gastosPorCuentaYMoneda.forEach((valor, key) => {
             if (valor.total === 0) return;
+            const codigo = key.split('-')[0];
 
-            detalles.push({
+            detallesDebeParcial.push({
                 codigo_cuenta: codigo,
                 denominacion: valor.denominacion,
                 debe: valor.total,
-                haber: 0
+                haber: 0,
+                moneda: valor.moneda
             });
 
-            // ESSALUD para remuneraciones
+            // ESSALUD para remuneraciones (también en el DEBE)
             if (codigo.startsWith('621')) {
                 const essaludGasto = valor.total * 0.09;
                 if (essaludGasto === 0) return;
@@ -413,102 +425,181 @@ export class GastoService {
                 else if (codigo.endsWith('.2')) essaludDenominacion += ' administrativas';
                 else if (codigo.endsWith('.3')) essaludDenominacion += ' de ventas';
 
-                detalles.push({
+                detallesDebeParcial.push({
                     codigo_cuenta: essaludCodigo,
                     denominacion: essaludDenominacion,
                     debe: essaludGasto,
-                    haber: 0
+                    haber: 0,
+                    moneda: valor.moneda
                 });
             }
         });
 
-        // DEBE: IGV
-        if (tributos.igv > 0) {
-            detalles.push({
-                codigo_cuenta: '40111',
-                denominacion: 'IGV - Cuenta propia',
-                debe: tributos.igv,
-                haber: 0
+        // ========== PASO 2: Calcular tributos y cuentas por pagar POR MONEDA ==========
+        const tributosPorMoneda = new Map<string, {
+            igv: number;
+            essalud: number;
+            onp: number;
+            afp: number;
+            remuneraciones_por_pagar: number;
+            facturas_por_pagar: number;
+            gastos_financieros: number;
+            gastos_sin_igv: number;
+        }>();
+
+        // Inicializar
+        monedasUnicas.forEach(moneda => {
+            tributosPorMoneda.set(moneda, {
+                igv: 0,
+                essalud: 0,
+                onp: 0,
+                afp: 0,
+                remuneraciones_por_pagar: 0,
+                facturas_por_pagar: 0,
+                gastos_financieros: 0,
+                gastos_sin_igv: 0
             });
-        }
+        });
 
-        // HABER: Tributos laborales
-        if (tributos.essalud > 0) {
-            detalles.push({
-                codigo_cuenta: '4031',
-                denominacion: 'Instituciones públicas - ESSALUD',
-                debe: 0,
-                haber: tributos.essalud
-            });
-        }
+        // Calcular dinámicamente
+        gastos.forEach(gasto => {
+            const moneda = gasto.moneda;
+            const tributo = tributosPorMoneda.get(moneda)!;
+            const montoBase = parseFloat(gasto.monto_base);
+            const montoIgv = parseFloat(gasto.monto_igv);
+            const esRemuneracion = gasto.cuenta_contable?.startsWith('621');
+            const esEssalud = gasto.cuenta_contable?.startsWith('627');
+            const esFinanciero = gasto.cuenta_contable?.startsWith('671');
 
-        if (tributos.onp > 0) {
-            detalles.push({
-                codigo_cuenta: '4032',
-                denominacion: 'Instituciones públicas - ONP',
-                debe: 0,
-                haber: tributos.onp
-            });
-        }
+            // IGV (solo para gastos con IGV que no sean remuneraciones ni financieros)
+            if (montoIgv > 0 && !esRemuneracion && !esEssalud && !esFinanciero) {
+                tributo.igv += montoIgv;
+                tributo.facturas_por_pagar += montoBase + montoIgv;
+            }
 
-        if (tributos.afp > 0) {
-            detalles.push({
-                codigo_cuenta: '407',
-                denominacion: 'Administradoras de fondos de pensiones',
-                debe: 0,
-                haber: tributos.afp
-            });
-        }
+            // Remuneraciones
+            if (esRemuneracion) {
+                const essaludCalculado = montoBase * 0.09;
+                tributo.essalud += essaludCalculado;
 
-        if (tributos.remuneraciones_por_pagar > 0) {
-            detalles.push({
-                codigo_cuenta: '411',
-                denominacion: 'Remuneraciones por pagar',
-                debe: 0,
-                haber: tributos.remuneraciones_por_pagar
-            });
-        }
+                let descuento = 0;
+                if (gasto.tipo_pension === 'ONP') {
+                    descuento = montoBase * 0.13;
+                    tributo.onp += descuento;
+                } else if (gasto.tipo_pension === 'AFP') {
+                    descuento = montoBase * 0.1137;
+                    tributo.afp += descuento;
+                }
 
-        // HABER: Facturas con IGV
-        if (tributos.facturas_por_pagar > 0) {
-            detalles.push({
-                codigo_cuenta: '4211',
-                denominacion: 'Facturas, boletas y otros comprobantes por pagar',
-                debe: 0,
-                haber: tributos.facturas_por_pagar
-            });
-        }
+                tributo.remuneraciones_por_pagar += montoBase - descuento;
+            }
 
-        // HABER: Gastos financieros
-        if (tributos.total_gastos_financieros > 0) {
-            detalles.push({
-                codigo_cuenta: '101',
-                denominacion: 'Caja y bancos',
-                debe: 0,
-                haber: tributos.total_gastos_financieros
-            });
-        }
+            // Gastos financieros
+            if (esFinanciero) {
+                tributo.gastos_financieros += montoBase;
+            }
 
-        // ✅ NUEVO: HABER para gastos SIN IGV (que no son remuneraciones ni financieros)
-        const gastosSinIgvNiEspeciales = gastos.filter(g =>
-            parseFloat(g.monto_igv) === 0 &&
-            !g.cuenta_contable?.startsWith('621') &&
-            !g.cuenta_contable?.startsWith('627') &&
-            !g.cuenta_contable?.startsWith('671')
-        );
+            // Gastos sin IGV (no remuneraciones, no essalud, no financieros)
+            if (montoIgv === 0 && !esRemuneracion && !esEssalud && !esFinanciero) {
+                tributo.gastos_sin_igv += montoBase;
+            }
+        });
 
-        const totalGastosSinIgv = gastosSinIgvNiEspeciales.reduce((sum, g) =>
-            sum + parseFloat(g.monto_base), 0
-        );
+        // ========== PASO 3: DEBE - Agregar IGV ==========
+        tributosPorMoneda.forEach((tributo, moneda) => {
+            if (tributo.igv > 0) {
+                detallesDebeParcial.push({
+                    codigo_cuenta: '40111',
+                    denominacion: 'IGV - Cuenta propia',
+                    debe: tributo.igv,
+                    haber: 0,
+                    moneda: moneda
+                });
+            }
+        });
 
-        if (totalGastosSinIgv > 0) {
-            detalles.push({
-                codigo_cuenta: '469',
-                denominacion: 'Otras cuentas por pagar diversas',
-                debe: 0,
-                haber: totalGastosSinIgv
-            });
-        }
+        // ========== PASO 4: HABER - Todas las cuentas por pagar ==========
+        tributosPorMoneda.forEach((tributo, moneda) => {
+            // ESSALUD por pagar
+            if (tributo.essalud > 0) {
+                detallesHaberParcial.push({
+                    codigo_cuenta: '4031',
+                    denominacion: 'Instituciones públicas - ESSALUD',
+                    debe: 0,
+                    haber: tributo.essalud,
+                    moneda: moneda
+                });
+            }
+
+            // ONP
+            if (tributo.onp > 0) {
+                detallesHaberParcial.push({
+                    codigo_cuenta: '4032',
+                    denominacion: 'Instituciones públicas - ONP',
+                    debe: 0,
+                    haber: tributo.onp,
+                    moneda: moneda
+                });
+            }
+
+            // AFP
+            if (tributo.afp > 0) {
+                detallesHaberParcial.push({
+                    codigo_cuenta: '407',
+                    denominacion: 'Administradoras de fondos de pensiones',
+                    debe: 0,
+                    haber: tributo.afp,
+                    moneda: moneda
+                });
+            }
+
+            // Remuneraciones por pagar (netas)
+            if (tributo.remuneraciones_por_pagar > 0) {
+                detallesHaberParcial.push({
+                    codigo_cuenta: '411',
+                    denominacion: 'Remuneraciones por pagar',
+                    debe: 0,
+                    haber: tributo.remuneraciones_por_pagar,
+                    moneda: moneda
+                });
+            }
+
+            // Facturas por pagar (base + IGV)
+            if (tributo.facturas_por_pagar > 0) {
+                detallesHaberParcial.push({
+                    codigo_cuenta: '4211',
+                    denominacion: 'Facturas, boletas y otros comprobantes por pagar',
+                    debe: 0,
+                    haber: tributo.facturas_por_pagar,
+                    moneda: moneda
+                });
+            }
+
+            // Gastos sin IGV (otras cuentas por pagar)
+            if (tributo.gastos_sin_igv > 0) {
+                detallesHaberParcial.push({
+                    codigo_cuenta: '469',
+                    denominacion: 'Otras cuentas por pagar diversas',
+                    debe: 0,
+                    haber: tributo.gastos_sin_igv,
+                    moneda: moneda
+                });
+            }
+
+            // Gastos financieros (caja y bancos)
+            if (tributo.gastos_financieros > 0) {
+                detallesHaberParcial.push({
+                    codigo_cuenta: '101',
+                    denominacion: 'Caja y bancos',
+                    debe: 0,
+                    haber: tributo.gastos_financieros,
+                    moneda: moneda
+                });
+            }
+        });
+
+        // ========== PASO 5: CONCATENAR - DEBE primero, HABER después ==========
+        const detalles = [...detallesDebeParcial, ...detallesHaberParcial];
 
         const totalDebe = detalles.reduce((sum, d) => sum + d.debe, 0);
         const totalHaber = detalles.reduce((sum, d) => sum + d.haber, 0);
@@ -554,6 +645,7 @@ export class GastoService {
 
         const montoBase = parseFloat(gasto.monto_base);
         const montoIgv = parseFloat(gasto.monto_igv);
+        const monedaGasto = gasto.moneda; // 👈 CAPTURAR MONEDA
         const esRemuneracion = gasto.cuenta_contable?.startsWith('621');
         const esFinanciero = gasto.cuenta_contable?.startsWith('671');
 
@@ -562,7 +654,8 @@ export class GastoService {
             codigo_cuenta: gasto.cuenta_contable || '',
             denominacion: gasto.nombre_clasificacion || gasto.descripcion,
             debe: montoBase,
-            haber: 0
+            haber: 0,
+            moneda: monedaGasto // 👈 INCLUIR MONEDA
         });
 
         // ===== CASO 1: REMUNERACIONES =====
@@ -580,7 +673,8 @@ export class GastoService {
                 codigo_cuenta: essaludCodigo,
                 denominacion: essaludDenominacion,
                 debe: essalud,
-                haber: 0
+                haber: 0,
+                moneda: monedaGasto // 👈 INCLUIR MONEDA
             });
 
             // HABER: ESSALUD por pagar
@@ -588,7 +682,8 @@ export class GastoService {
                 codigo_cuenta: '4031',
                 denominacion: 'Instituciones públicas - ESSALUD',
                 debe: 0,
-                haber: essalud
+                haber: essalud,
+                moneda: monedaGasto // 👈 INCLUIR MONEDA
             });
 
             // HABER: ONP o AFP
@@ -598,7 +693,8 @@ export class GastoService {
                     codigo_cuenta: '4032',
                     denominacion: 'Instituciones públicas - ONP',
                     debe: 0,
-                    haber: onp
+                    haber: onp,
+                    moneda: monedaGasto // 👈 INCLUIR MONEDA
                 });
             } else if (gasto.tipo_pension === 'AFP') {
                 const afp = montoBase * 0.1137;
@@ -606,7 +702,8 @@ export class GastoService {
                     codigo_cuenta: '407',
                     denominacion: 'Administradoras de fondos de pensiones',
                     debe: 0,
-                    haber: afp
+                    haber: afp,
+                    moneda: monedaGasto // 👈 INCLUIR MONEDA
                 });
             }
 
@@ -621,7 +718,8 @@ export class GastoService {
                 codigo_cuenta: '411',
                 denominacion: 'Remuneraciones por pagar',
                 debe: 0,
-                haber: montoBase - descuentos
+                haber: montoBase - descuentos,
+                moneda: monedaGasto // 👈 INCLUIR MONEDA
             });
         }
         // ===== CASO 2: GASTOS FINANCIEROS =====
@@ -631,7 +729,8 @@ export class GastoService {
                 codigo_cuenta: '101',
                 denominacion: 'Caja y bancos',
                 debe: 0,
-                haber: montoBase // Financieros no tienen IGV
+                haber: montoBase, // Financieros no tienen IGV
+                moneda: monedaGasto // 👈 INCLUIR MONEDA
             });
         }
         // ===== CASO 3: GASTOS CON IGV =====
@@ -641,7 +740,8 @@ export class GastoService {
                 codigo_cuenta: '40111',
                 denominacion: 'IGV - Cuenta propia',
                 debe: montoIgv,
-                haber: 0
+                haber: 0,
+                moneda: monedaGasto // 👈 INCLUIR MONEDA
             });
 
             // HABER: Facturas por pagar (base + IGV)
@@ -649,7 +749,8 @@ export class GastoService {
                 codigo_cuenta: '4211',
                 denominacion: 'Facturas, boletas y otros comprobantes por pagar',
                 debe: 0,
-                haber: montoBase + montoIgv
+                haber: montoBase + montoIgv,
+                moneda: monedaGasto // 👈 INCLUIR MONEDA
             });
         }
         // ===== CASO 4: GASTOS SIN IGV (ej: alquileres, servicios sin factura) =====
@@ -659,7 +760,8 @@ export class GastoService {
                 codigo_cuenta: '469',
                 denominacion: 'Otras cuentas por pagar diversas',
                 debe: 0,
-                haber: montoBase
+                haber: montoBase,
+                moneda: monedaGasto // 👈 INCLUIR MONEDA
             });
         }
 

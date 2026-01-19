@@ -352,7 +352,7 @@ router.post('/quote-form', async (req, res) => {
 
         // ✅ CAMBIO: Obtener cuenta de bienes desde tipo_mercancia_id
         const tipoMercanciaRes = await dbQuery<{ cuenta_contable: string; nombre: string }>(
-            `SELECT cuenta_contable, nombre FROM miaff.tipo_mercancia WHERE id = $1 LIMIT 1`,
+            `SELECT cuenta_contable, nombre FROM miaff.tipo_mercancia_importacion WHERE id = $1 LIMIT 1`,
             [f.tipo_mercancia_id]
         );
 
