@@ -1,6 +1,11 @@
 // src/db.ts
-import { Pool, QueryResultRow } from 'pg'; // <-- 1. IMPORTACIÓN AÑADIDA
+import { Pool, QueryResultRow, types } from 'pg'; // <-- 1. IMPORTACIÓN AÑADIDA
 import { config } from './config';
+
+// Evitar que node-pg convierta DATE (OID 1082) a objeto Date de JS.
+// Lo devolvemos como string "YYYY-MM-DD" tal cual viene de PostgreSQL,
+// para que no haya desfase de timezone (ej. Perú UTC-5).
+types.setTypeParser(1082, (val: string) => val);
 
 const pool = config.databaseUrl
   ? new Pool({ 
