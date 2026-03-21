@@ -12,7 +12,8 @@ export class ExchangeRateController {
      */
     static async getExchangeRate(req: Request, res: Response): Promise<void> {
         try {
-            const info = await ExchangeRateService.getExchangeRateInfo();
+            const date = req.query.date as string | undefined;
+            const info = await ExchangeRateService.getExchangeRateInfo(date);
 
             res.json({
                 success: true,
@@ -20,7 +21,6 @@ export class ExchangeRateController {
                     rate: info.rate,
                     buy_price: info.buyPrice,
                     date: info.date,
-                    message: 'Tipo de cambio actualizado'
                 }
             });
         } catch (error: any) {

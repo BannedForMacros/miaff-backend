@@ -33,7 +33,8 @@ const router = Router();
  *       401:
  *         description: No autorizado
  */
-router.get('/', requireAuth, ExchangeRateController.getExchangeRate);
+// Público: el frontend lo consulta al iniciar, antes de tener token
+router.get('/', ExchangeRateController.getExchangeRate);
 
 /**
  * @swagger
