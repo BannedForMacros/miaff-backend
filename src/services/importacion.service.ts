@@ -1,5 +1,6 @@
 import { dbQuery } from '../db';
 import { ImportacionCalculada, ImportacionDB, TributoDB, UpdateImportacionData, TipoMercanciaImportacion } from '../types/importacion.types';
+import { ExchangeRateService } from './exchangeRate.service';
 
 type ImportacionInputData = any;
 
@@ -303,6 +304,15 @@ export class ImportacionService {
 
         const calculado = await this.calcularImportacion(data, tasasImpuestos, tipoMercancia);
 
+        // Obtener TC de la fecha de operación
+        const fechaOp = data.fecha_operacion || new Date().toISOString().split('T')[0];
+        let tipoCambioFecha: number | null = null;
+        try {
+            tipoCambioFecha = await ExchangeRateService.getExchangeRate(fechaOp);
+        } catch (e) {
+            console.warn('⚠️ No se pudo obtener TC para fecha', fechaOp, e);
+        }
+
         const { rows } = await dbQuery<ImportacionDB>(
             `INSERT INTO miaff.importaciones (
                 caso_estudio_id, user_id, tipo_mercancia_id, subpartida_hs10, descripcion_mercancia,
@@ -311,10 +321,10 @@ export class ImportacionService {
                 ad_valorem_tasa_manual, isc_tasa_ingresada, percepcion_tasa_ingresada,
                 antidumping_ingresado, compensatorio_ingresado, sda_ingresado,
                 valor_cif, monto_ad_valorem, monto_isc, monto_igv, monto_ipm,
-                monto_percepcion, dta_total, asiento_contable_json, fecha_operacion, activo
+                monto_percepcion, dta_total, asiento_contable_json, fecha_operacion, tipo_cambio_fecha, activo
             ) VALUES (
                          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                         $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
+                         $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
                      ) RETURNING *`,
             [
                 data.caso_estudio_id, user_id, data.tipo_mercancia_id, data.subpartida_hs10, data.descripcion_mercancia,
@@ -325,7 +335,7 @@ export class ImportacionService {
                 calculado.valor_cif, calculado.monto_ad_valorem, calculado.monto_isc,
                 calculado.monto_igv, calculado.monto_ipm, calculado.monto_percepcion,
                 calculado.dta_total, JSON.stringify(calculado.asiento_contable),
-                data.fecha_operacion || new Date().toISOString().split('T')[0],
+                fechaOp, tipoCambioFecha,
                 1
             ]
         );

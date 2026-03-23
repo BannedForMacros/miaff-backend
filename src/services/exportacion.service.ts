@@ -8,6 +8,7 @@ import {
     AsientoContableExportacion,
     AsientoContableDetalle, AsientoContableExportacionDB
 } from '../types/exportacion.types';
+import { ExchangeRateService } from './exchangeRate.service';
 
 // exportacion.service.ts
 
@@ -193,12 +194,21 @@ export class ExportacionService {
 
         const calculado = this.calcularMontos(valor_venta, es_venta_nacional);
 
+        // Obtener TC de la fecha de operación
+        const fechaOp = fecha_operacion || new Date().toISOString().split('T')[0];
+        let tipoCambioFecha: number | null = null;
+        try {
+            tipoCambioFecha = await ExchangeRateService.getExchangeRate(fechaOp);
+        } catch (e) {
+            console.warn('⚠️ No se pudo obtener TC para fecha', fechaOp, e);
+        }
+
         const sql = `
       INSERT INTO miaff.exportaciones (
         user_id, caso_estudio_id, es_venta_nacional, tipo_producto_id, incoterm,
-        descripcion_venta, pais_origen, pais_destino, 
-        valor_venta, monto_base, monto_igv, moneda, fecha_operacion, activo
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, true)
+        descripcion_venta, pais_origen, pais_destino,
+        valor_venta, monto_base, monto_igv, moneda, fecha_operacion, tipo_cambio_fecha, activo
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true)
       RETURNING *;
     `;
 
@@ -215,7 +225,8 @@ export class ExportacionService {
             calculado.base,
             calculado.igv,
             moneda,
-            fecha_operacion || new Date().toISOString().split('T')[0]
+            fechaOp,
+            tipoCambioFecha
         ];
 
         const { rows } = await dbQuery<ExportacionDB>(sql, params);

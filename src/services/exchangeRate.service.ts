@@ -15,7 +15,7 @@ const memoryCache = new Map<string, ExchangeRateInfo & { timestamp: number }>();
 
 export class ExchangeRateService {
     private static DECOLECTA_TOKEN = process.env.EXPO_PUBLIC_DECOLECTA_TOKEN;
-    private static FALLBACK_RATE = 3.371;
+    // Sin fallback hardcodeado — si falla todo, el error se propaga
     private static tableReady = false;
 
     // Crea la tabla si no existe (se llama una sola vez)
@@ -98,8 +98,8 @@ export class ExchangeRateService {
             memoryCache.set(info.date, { ...info, timestamp: Date.now() });
             return info;
         } catch (error) {
-            console.error(`❌ Error desde Decolecta, usando fallback:`, error);
-            return { rate: this.FALLBACK_RATE, buyPrice: this.FALLBACK_RATE, date: targetDate };
+            console.error(`❌ Error obteniendo T/C desde Decolecta para ${targetDate}:`, error);
+            throw new Error(`No se pudo obtener el tipo de cambio para ${targetDate}`);
         }
     }
 

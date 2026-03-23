@@ -76,6 +76,22 @@ export type DetallesAnalisis = {
     gastos: GastosPorClasificacion;
 };
 
+// Desglose común para gastos operativos, administrativos y ventas
+export interface DesgloseGastos {
+    remuneraciones: number;
+    seguridad_social: number;
+    transporte_viajes: number;
+    asesoria_consultoria: number;
+    produccion_terceros: number;
+    mantenimiento_reparaciones: number;
+    alquileres: number;
+    servicios_basicos: number;
+    publicidad: number;
+    otros_servicios: number;
+    seguros: number;
+    otros_gastos: number;
+}
+
 // ✅ Estado de Resultados en USD (moneda base)
 export interface EstadoResultados {
     ventas: {
@@ -95,48 +111,10 @@ export interface EstadoResultados {
         total_costo_ventas: number;
     };
     utilidad_bruta: number;
-    gastos_operativos: {
-        remuneraciones: number;
-        seguridad_social: number;
-        transporte_viajes: number;
-        asesoria_consultoria: number;
-        produccion_terceros: number; // 633
-        mantenimiento_reparaciones: number;
-        alquileres: number;
-        servicios_basicos: number;
-        otros_servicios: number;
-        seguros: number;
-        otros_gastos: number;
-        total_gastos_operativos: number;
-    };
+    gastos_operativos: DesgloseGastos & { total_gastos_operativos: number };
     utilidad_operativa: number;
-    gastos_administrativos: {
-        remuneraciones: number;
-        seguridad_social: number;
-        transporte_viajes: number;
-        asesoria_consultoria: number;
-        mantenimiento_reparaciones: number;
-        alquileres: number;
-        servicios_basicos: number;
-        otros_servicios: number;
-        seguros: number;
-        otros_gastos: number;
-        total_gastos_administrativos: number;
-    };
-    gastos_ventas: {
-        remuneraciones: number;
-        seguridad_social: number;
-        transporte_viajes: number;
-        asesoria_consultoria: number;
-        mantenimiento_reparaciones: number;
-        alquileres: number;
-        servicios_basicos: number;
-        publicidad: number;
-        otros_servicios: number;
-        seguros: number;
-        otros_gastos: number;
-        total_gastos_ventas: number;
-    };
+    gastos_administrativos: DesgloseGastos & { total_gastos_administrativos: number };
+    gastos_ventas: DesgloseGastos & { total_gastos_ventas: number };
     gastos_financieros: {
         intereses_desgravamen: number;
         comisiones_bancarias: number;

@@ -13,6 +13,7 @@ import {
     RatiosFinancieros,
     ActualizarGastoInput
 } from '../types/gastos.types';
+import { ExchangeRateService } from './exchangeRate.service';
 
 export class GastoService {
 
@@ -98,12 +99,21 @@ export class GastoService {
         // Calcular monto_base y monto_igv
         const calculado = this.calcularMontos(monto, incluyeIgvFinal === true);
 
+        // Obtener TC de la fecha del gasto
+        const fechaG = fecha_gasto || new Date().toISOString().split('T')[0];
+        let tipoCambioFecha: number | null = null;
+        try {
+            tipoCambioFecha = await ExchangeRateService.getExchangeRate(fechaG);
+        } catch (e) {
+            console.warn('⚠️ No se pudo obtener TC para fecha', fechaG, e);
+        }
+
         const sql = `
     INSERT INTO miaff.gastos (
       user_id, caso_estudio_id, clasificacion_id, descripcion,
-      monto, monto_base, monto_igv, moneda, fecha_gasto, 
-      es_remuneracion, tipo_pension, incluye_igv, activo
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1)
+      monto, monto_base, monto_igv, moneda, fecha_gasto,
+      es_remuneracion, tipo_pension, incluye_igv, tipo_cambio_fecha, activo
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1)
     RETURNING *;
   `;
 
@@ -116,10 +126,11 @@ export class GastoService {
             calculado.base,
             calculado.igv,
             moneda,
-            fecha_gasto || new Date().toISOString().split('T')[0],
+            fechaG,
             es_remuneracion || false,
             tipo_pension || null,
-            incluyeIgvFinal
+            incluyeIgvFinal,
+            tipoCambioFecha
         ];
 
         const { rows } = await dbQuery<GastoDB>(sql, params);

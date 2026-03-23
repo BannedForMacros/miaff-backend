@@ -13,6 +13,7 @@ import {
     UtilidadOperativa,
     UtilidadNeta,
     EstadoResultados,
+    DesgloseGastos,
     RatiosFinancieros
 } from '../types/analisis.types';
 import { ExchangeRateService } from './exchangeRate.service';
@@ -100,20 +101,9 @@ export class AnalisisService {
                 throw new Error('Caso de estudio no encontrado o no autorizado');
             }
 
-            // ✅ VALIDAR TIPO DE CAMBIO
-            let tipoCambio: number;
-            try {
-                tipoCambio = await ExchangeRateService.getExchangeRate();
-                if (!tipoCambio || tipoCambio <= 0) {
-                    console.warn('⚠️ Tipo de cambio inválido, usando valor por defecto: 3.75');
-                    tipoCambio = 3.75;
-                }
-                console.log(`💱 Tipo de cambio: S/ ${tipoCambio.toFixed(4)}`);
-            } catch (error) {
-                console.error('❌ Error obteniendo tipo de cambio:', error);
-                tipoCambio = 3.75; // Valor por defecto
-                console.warn(`⚠️ Usando tipo de cambio por defecto: ${tipoCambio}`);
-            }
+            // Tipo de cambio de hoy (fallback para registros sin TC guardado)
+            const tipoCambio = await ExchangeRateService.getExchangeRate();
+            console.log(`💱 Tipo de cambio (hoy, fallback): S/ ${tipoCambio.toFixed(4)}`);
 
             const casoInfo = await this.obtenerInfoCaso(casoId);
             const importaciones = await this.obtenerImportaciones(casoId);
@@ -255,7 +245,8 @@ export class AnalisisService {
                 i.compensatorio_ingresado,
                 i.sda_ingresado,
                 i.moneda,
-                i.fecha_operacion
+                i.fecha_operacion,
+                i.tipo_cambio_fecha
             FROM miaff.importaciones i
                      LEFT JOIN miaff.tipo_mercancia_importacion tm ON tm.id = i.tipo_mercancia_id
             WHERE i.caso_estudio_id = $1 AND i.activo = 1
@@ -335,7 +326,8 @@ export class AnalisisService {
                 e.moneda,
                 e.fecha_operacion,
                 e.pais_origen,
-                e.pais_destino
+                e.pais_destino,
+                e.tipo_cambio_fecha
             FROM miaff.exportaciones e
                      LEFT JOIN miaff.tipo_producto_venta tp ON tp.id = e.tipo_producto_id
             WHERE e.caso_estudio_id = $1 AND e.activo = true
@@ -366,12 +358,13 @@ export class AnalisisService {
                 g.clasificacion_id,
                 cg.tipo_gasto as clasificacion_nombre,
                 g.descripcion,
-                g.cuenta_contable_codigo,
+                COALESCE(g.cuenta_contable_codigo, cg.cuenta_contable) as cuenta_contable_codigo,
                 g.monto,
                 g.monto_base,
                 g.monto_igv,
                 g.moneda,
-                g.fecha_gasto
+                g.fecha_gasto,
+                g.tipo_cambio_fecha
             FROM miaff.gastos g
                      INNER JOIN miaff.clasificacion_gastos cg ON g.clasificacion_id = cg.id
             WHERE g.caso_estudio_id = $1 AND g.activo = 1
@@ -433,7 +426,8 @@ export class AnalisisService {
             let productosInternacionales = 0;
 
             exportaciones.forEach((exp) => {
-                const baseUSD = this.convertirAUSD(exp.monto_base, exp.moneda, tipoCambio);
+                const tc = (exp as any).tipo_cambio_fecha ?? tipoCambio;
+                const baseUSD = this.convertirAUSD(exp.monto_base, exp.moneda, tc);
                 if (exp.es_venta_nacional) {
                     if (exp.tipo_producto_cuenta?.startsWith('701')) mercaderiasNacionales += baseUSD;
                     else if (exp.tipo_producto_cuenta?.startsWith('702')) productosNacionales += baseUSD;
@@ -454,10 +448,11 @@ export class AnalisisService {
             let costosVinculados = 0;
 
             importaciones.forEach((imp) => {
-                const cifUSD = this.convertirAUSD(imp.valor_cif, imp.moneda, tipoCambio);
-                const adUSD = this.convertirAUSD(imp.antidumping_ingresado, imp.moneda, tipoCambio);
-                const cvdUSD = this.convertirAUSD(imp.compensatorio_ingresado, imp.moneda, tipoCambio);
-                const sdaUSD = this.convertirAUSD(imp.sda_ingresado, imp.moneda, tipoCambio);
+                const tc = (imp as any).tipo_cambio_fecha ?? tipoCambio;
+                const cifUSD = this.convertirAUSD(imp.valor_cif, imp.moneda, tc);
+                const adUSD = this.convertirAUSD(imp.antidumping_ingresado, imp.moneda, tc);
+                const cvdUSD = this.convertirAUSD(imp.compensatorio_ingresado, imp.moneda, tc);
+                const sdaUSD = this.convertirAUSD(imp.sda_ingresado, imp.moneda, tc);
 
                 switch (imp.tipo_mercancia_cuenta) {
                     case '601': mercaderias += cifUSD; break;
@@ -530,104 +525,114 @@ export class AnalisisService {
         }
     }
 
-    private static desglosarGastos(gastos: GastoDetalle[], tipoCambio: number) {
-        let remuneraciones = 0;
-        let seguridadSocial = 0;
-        let transporteViajes = 0;
-        let asesoriaConsultoria = 0;
-        let produccionTerceros = 0;
-        let mantenimientoReparaciones = 0;
-        let alquileres = 0;
-        let serviciosBasicos = 0;
-        let otrosServicios = 0;
-        let seguros = 0;
-        let otrosGastos = 0;
+    /**
+     * Clasifica gastos por cuenta contable (de clasificacion_gastos).
+     * Mapeo:
+     *   621.x → remuneraciones
+     *   627.x → seguridad_social (ESSALUD)
+     *   631.x → transporte_viajes (incluye flete)
+     *   632.x → asesoria_consultoria
+     *   633.x → produccion_terceros
+     *   634.x → mantenimiento_reparaciones
+     *   635.x → alquileres
+     *   636.x → servicios_basicos
+     *   637.x → publicidad
+     *   639.x → otros_servicios
+     *   651.x → seguros
+     *   659.x / resto → otros_gastos
+     */
+    private static desglosarGastos(gastos: GastoDetalle[], tipoCambio: number): { totalRaw: number; desglose: DesgloseGastos } {
+        const acc: DesgloseGastos = {
+            remuneraciones: 0,
+            seguridad_social: 0,
+            transporte_viajes: 0,
+            asesoria_consultoria: 0,
+            produccion_terceros: 0,
+            mantenimiento_reparaciones: 0,
+            alquileres: 0,
+            servicios_basicos: 0,
+            publicidad: 0,
+            otros_servicios: 0,
+            seguros: 0,
+            otros_gastos: 0,
+        };
+
+        // Mapeo de prefijo de cuenta contable → categoría del desglose
+        const mapCuenta: Record<string, keyof DesgloseGastos> = {
+            '621': 'remuneraciones',
+            '627': 'seguridad_social',
+            '631': 'transporte_viajes',
+            '632': 'asesoria_consultoria',
+            '633': 'produccion_terceros',
+            '634': 'mantenimiento_reparaciones',
+            '635': 'alquileres',
+            '636': 'servicios_basicos',
+            '637': 'publicidad',
+            '639': 'otros_servicios',
+            '651': 'seguros',
+            '659': 'otros_gastos',
+        };
 
         gastos.forEach(gasto => {
             try {
-                const montoUSD = this.convertirAUSD(gasto.monto_base, gasto.moneda, tipoCambio);
-                const desc = (gasto.descripcion || '').toLowerCase();
-                const cuenta = (gasto.cuenta_contable_codigo || '').toLowerCase();
+                const tc = (gasto as any).tipo_cambio_fecha ?? tipoCambio;
+                const montoUSD = this.convertirAUSD(gasto.monto_base, gasto.moneda, tc);
+                const cuenta = (gasto.cuenta_contable_codigo || '').trim();
 
-                if (desc.includes('remunerac') || cuenta.startsWith('621')) remuneraciones += montoUSD;
-                else if (desc.includes('seguridad') || desc.includes('social') || desc.includes('essalud') || cuenta.startsWith('627')) seguridadSocial += montoUSD;
-                else if (desc.includes('transport') || desc.includes('viaje') || cuenta.startsWith('631')) transporteViajes += montoUSD;
-                else if (desc.includes('asesor') || desc.includes('consult') || cuenta.startsWith('632')) asesoriaConsultoria += montoUSD;
-                else if (desc.includes('producc') || desc.includes('tercer') || cuenta.startsWith('633')) produccionTerceros += montoUSD;
-                else if (desc.includes('mantenimiento') || desc.includes('reparac') || cuenta.startsWith('634')) mantenimientoReparaciones += montoUSD;
-                else if (desc.includes('alquiler') || cuenta.startsWith('635')) alquileres += montoUSD;
-                else if (desc.includes('luz') || desc.includes('agua') || desc.includes('internet') || cuenta.startsWith('636')) serviciosBasicos += montoUSD;
-                else if (desc.includes('servicio') || cuenta.startsWith('639')) otrosServicios += montoUSD;
-                else if (desc.includes('seguro') || cuenta.startsWith('651')) seguros += montoUSD;
-                else otrosGastos += montoUSD;
+                // Buscar categoría por prefijo de 3 dígitos de la cuenta contable
+                const prefijo = cuenta.substring(0, 3);
+                const categoria = mapCuenta[prefijo] || 'otros_gastos';
+                acc[categoria] += montoUSD;
             } catch (error) {
                 console.warn(`⚠️ Error procesando gasto ${gasto.id}:`, error);
             }
         });
 
-        const totalRaw = remuneraciones + seguridadSocial + transporteViajes + asesoriaConsultoria +
-            produccionTerceros + mantenimientoReparaciones + alquileres +
-            serviciosBasicos + otrosServicios + seguros + otrosGastos;
+        const totalRaw = Object.values(acc).reduce((sum, v) => sum + v, 0);
 
-        return {
-            totalRaw, // Devolvemos el total sin redondear para cálculos superiores
-            desglose: {
-                remuneraciones: this.redondear(remuneraciones),
-                seguridad_social: this.redondear(seguridadSocial),
-                transporte_viajes: this.redondear(transporteViajes),
-                asesoria_consultoria: this.redondear(asesoriaConsultoria),
-                produccion_terceros: this.redondear(produccionTerceros),
-                mantenimiento_reparaciones: this.redondear(mantenimientoReparaciones),
-                alquileres: this.redondear(alquileres),
-                servicios_basicos: this.redondear(serviciosBasicos),
-                otros_servicios: this.redondear(otrosServicios),
-                seguros: this.redondear(seguros),
-                otros_gastos: this.redondear(otrosGastos)
-            }
+        const desglose: DesgloseGastos = {
+            remuneraciones: this.redondear(acc.remuneraciones),
+            seguridad_social: this.redondear(acc.seguridad_social),
+            transporte_viajes: this.redondear(acc.transporte_viajes),
+            asesoria_consultoria: this.redondear(acc.asesoria_consultoria),
+            produccion_terceros: this.redondear(acc.produccion_terceros),
+            mantenimiento_reparaciones: this.redondear(acc.mantenimiento_reparaciones),
+            alquileres: this.redondear(acc.alquileres),
+            servicios_basicos: this.redondear(acc.servicios_basicos),
+            publicidad: this.redondear(acc.publicidad),
+            otros_servicios: this.redondear(acc.otros_servicios),
+            seguros: this.redondear(acc.seguros),
+            otros_gastos: this.redondear(acc.otros_gastos),
         };
+
+        return { totalRaw, desglose };
     }
 
     private static desglosarGastosVentas(gastos: GastoDetalle[], tipoCambio: number) {
-        const base = this.desglosarGastos(gastos, tipoCambio);
-        let publicidad = 0;
-
-        gastos.forEach(gasto => {
-            try {
-                const montoUSD = this.convertirAUSD(gasto.monto_base, gasto.moneda, tipoCambio);
-                const desc = (gasto.descripcion || '').toLowerCase();
-                const cuenta = (gasto.cuenta_contable_codigo || '').toLowerCase();
-
-                if (desc.includes('publicidad') || desc.includes('marketing') || desc.includes('publicacion') || cuenta.startsWith('637')) {
-                    publicidad += montoUSD;
-                }
-            } catch (error) {
-                console.warn(`⚠️ Error procesando gasto de ventas ${gasto.id}:`, error);
-            }
-        });
-
-        return {
-            totalRaw: base.totalRaw, // Usamos el total raw de la base (publicidad ya está incluido en otrosGastos o donde caiga en la base, o si es separado se suma aquí)
-            desglose: {
-                ...base.desglose,
-                publicidad: this.redondear(publicidad)
-            }
-        };
+        // publicidad ya se clasifica correctamente en desglosarGastos(), no hace falta doble escaneo
+        return this.desglosarGastos(gastos, tipoCambio);
     }
 
+    /**
+     * Clasifica gastos financieros por cuenta contable:
+     *   671.1 → intereses_desgravamen
+     *   671.2 → comisiones_bancarias
+     */
     private static desglosarGastosFinancieros(gastos: GastoDetalle[], tipoCambio: number) {
         let interesesDesgravamen = 0;
         let comisionesBancarias = 0;
 
         gastos.forEach(gasto => {
             try {
-                const montoUSD = this.convertirAUSD(gasto.monto_base, gasto.moneda, tipoCambio);
-                const desc = (gasto.descripcion || '').toLowerCase();
-                const cuenta = (gasto.cuenta_contable_codigo || '').toLowerCase();
+                const tc = (gasto as any).tipo_cambio_fecha ?? tipoCambio;
+                const montoUSD = this.convertirAUSD(gasto.monto_base, gasto.moneda, tc);
+                const cuenta = (gasto.cuenta_contable_codigo || '').trim();
 
-                if (desc.includes('interes') || desc.includes('desgravamen') || cuenta.startsWith('67')) {
-                    interesesDesgravamen += montoUSD;
-                } else if (desc.includes('comision') || desc.includes('bancari') || cuenta.startsWith('639')) {
+                if (cuenta.startsWith('671.2')) {
                     comisionesBancarias += montoUSD;
+                } else {
+                    // 671.1 y cualquier otro financiero → intereses/desgravamen
+                    interesesDesgravamen += montoUSD;
                 }
             } catch (error) {
                 console.warn(`⚠️ Error procesando gasto financiero ${gasto.id}:`, error);
