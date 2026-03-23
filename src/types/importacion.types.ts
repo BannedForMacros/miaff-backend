@@ -28,8 +28,9 @@ export interface ImportacionCalculada {
 
 export interface CreateImportacionData {
     caso_estudio_id: number;
-    tipo_mercancia_id: number; // NUEVO
-    subpartida_hs10: string;
+    es_compra_nacional: boolean;
+    tipo_mercancia_id: number;
+    subpartida_hs10?: string;
     descripcion_mercancia: string;
     moneda: 'USD' | 'PEN';
     valor_fob: number;
@@ -49,7 +50,8 @@ export interface CreateImportacionData {
 
 export interface UpdateImportacionData {
     caso_estudio_id?: number;
-    tipo_mercancia_id?: number; // NUEVO
+    es_compra_nacional?: boolean;
+    tipo_mercancia_id?: number;
     subpartida_hs10?: string;
     descripcion_mercancia?: string;
     moneda?: 'USD' | 'PEN';
@@ -97,7 +99,8 @@ export interface ImportacionDB {
     id: number;
     caso_estudio_id: number;
     user_id: string;
-    tipo_mercancia_id?: number; // NUEVO
+    es_compra_nacional: boolean;
+    tipo_mercancia_id?: number;
     subpartida_hs10: string;
     descripcion_mercancia: string;
     moneda: 'USD' | 'PEN';

@@ -2,6 +2,7 @@
 
 export interface ImportacionDetalle {
     id: number;
+    es_compra_nacional: boolean;
     subpartida_hs10: string;
     descripcion_mercancia: string;
     tipo_mercancia_id: number;
@@ -102,12 +103,15 @@ export interface EstadoResultados {
         total_ventas_sin_igv: number; // ✅ SOLO SIN IGV
     };
     costo_ventas: {
-        // ✅ SOLO CUENTAS 601-604, 609
-        mercaderias: number; // 601
+        mercaderias: number; // 601 total
+        mercaderias_importadas: number; // 601 de importaciones
+        mercaderias_nacionales: number; // 601 de compras nacionales
         materias_primas: number; // 602
+        materias_primas_importadas: number;
+        materias_primas_nacionales: number;
         materiales_auxiliares: number; // 603
         envases_embalajes: number; // 604
-        costos_vinculados: number; // 609: AD, CVD, SDA
+        costos_vinculados: number; // 609: AD, CVD, SDA (solo importaciones)
         total_costo_ventas: number;
     };
     utilidad_bruta: number;

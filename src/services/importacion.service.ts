@@ -88,6 +88,11 @@ export class ImportacionService {
         tasasImpuestos: { igv: number; ipm: number },
         tipoMercancia: TipoMercanciaImportacion
     ): Promise<ImportacionCalculada> {
+        // Compra nacional: cálculo simplificado (solo IGV/IPM)
+        if (data.es_compra_nacional) {
+            return this.calcularCompraNacional(data, tasasImpuestos, tipoMercancia);
+        }
+
         const reglas = await this._obtenerReglasContables();
 
         // ===== CÁLCULOS CON PRECISIÓN =====
@@ -278,6 +283,70 @@ export class ImportacionService {
         };
     }
 
+    // Cálculo simplificado para compras nacionales: monto + IGV/IPM
+    private static async calcularCompraNacional(
+        data: ImportacionInputData,
+        tasasImpuestos: { igv: number; ipm: number },
+        tipoMercancia: TipoMercanciaImportacion
+    ): Promise<ImportacionCalculada> {
+        const reglas = await this._obtenerReglasContables();
+
+        const monto = round2(data.valor_fob); // valor_fob = monto de compra para nacional
+        const montoIGV = round2(monto * tasasImpuestos.igv);
+        const montoIPM = round2(monto * tasasImpuestos.ipm);
+
+        const tributos: TributoDB[] = [];
+        if (montoIGV > 0) tributos.push({ concepto: 'igv', base_imponible: monto, tasa_aplicada: tasasImpuestos.igv, monto_calculado: montoIGV });
+        if (montoIPM > 0) tributos.push({ concepto: 'ipm', base_imponible: monto, tasa_aplicada: tasasImpuestos.ipm, monto_calculado: montoIPM });
+
+        const asientoContable: any[] = [];
+
+        // DEBE: Cuenta de mercancía (601-604)
+        asientoContable.push({
+            cuenta: tipoMercancia.cuenta_contable,
+            nombre_cuenta: tipoMercancia.nombre,
+            debe: monto,
+            haber: 0,
+            glosa: `Compra nacional - ${data.descripcion_mercancia}`
+        });
+
+        // DEBE: IGV + IPM (40111)
+        const igvIpmTotal = round2(montoIGV + montoIPM);
+        if (igvIpmTotal > 0) {
+            const reglaIgv = reglas.get('igv') || { cuenta: '40111', nombre_cuenta: 'IGV – Cuenta propia' };
+            asientoContable.push({
+                cuenta: reglaIgv.cuenta,
+                nombre_cuenta: reglaIgv.nombre_cuenta,
+                debe: igvIpmTotal,
+                haber: 0,
+                glosa: 'IGV e IPM de Compra Nacional'
+            });
+        }
+
+        // HABER: Proveedores (421)
+        const totalDebe = round2(asientoContable.reduce((sum, l) => sum + l.debe, 0));
+        const regla421 = reglas.get('proveedores') || { cuenta: '421', nombre_cuenta: 'Facturas, boletas y otros comprobantes por pagar' };
+        asientoContable.push({
+            cuenta: regla421.cuenta,
+            nombre_cuenta: regla421.nombre_cuenta,
+            debe: 0,
+            haber: totalDebe,
+            glosa: 'Total a Pagar por Compra Nacional'
+        });
+
+        return {
+            valor_cif: monto,
+            monto_ad_valorem: 0,
+            monto_isc: 0,
+            monto_igv: montoIGV,
+            monto_ipm: montoIPM,
+            monto_percepcion: 0,
+            dta_total: igvIpmTotal,
+            tributos,
+            asiento_contable: asientoContable
+        };
+    }
+
     static async crearImportacion(
         user_id: string,
         data: ImportacionInputData
@@ -297,7 +366,8 @@ export class ImportacionService {
 
         const tipoMercancia = tipoRows[0];
 
-        if (!data.ad_valorem_tasa_manual && data.subpartida_hs10) {
+        // Para importaciones: buscar tasa ad valorem automática
+        if (!data.es_compra_nacional && !data.ad_valorem_tasa_manual && data.subpartida_hs10) {
             const tasaAutomatica = await this.obtenerTasaAdValorem(data.subpartida_hs10);
             data.ad_valorem_tasa_manual = tasaAutomatica ?? 0;
         }
@@ -315,7 +385,7 @@ export class ImportacionService {
 
         const { rows } = await dbQuery<ImportacionDB>(
             `INSERT INTO miaff.importaciones (
-                caso_estudio_id, user_id, tipo_mercancia_id, subpartida_hs10, descripcion_mercancia,
+                caso_estudio_id, user_id, es_compra_nacional, tipo_mercancia_id, subpartida_hs10, descripcion_mercancia,
                 moneda, valor_fob, valor_flete, valor_seguro,
                 habilitar_igv, habilitar_isc, habilitar_percepcion,
                 ad_valorem_tasa_manual, isc_tasa_ingresada, percepcion_tasa_ingresada,
@@ -323,15 +393,16 @@ export class ImportacionService {
                 valor_cif, monto_ad_valorem, monto_isc, monto_igv, monto_ipm,
                 monto_percepcion, dta_total, asiento_contable_json, fecha_operacion, tipo_cambio_fecha, activo
             ) VALUES (
-                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                         $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
+                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                         $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30
                      ) RETURNING *`,
             [
-                data.caso_estudio_id, user_id, data.tipo_mercancia_id, data.subpartida_hs10, data.descripcion_mercancia,
-                data.moneda, data.valor_fob, data.valor_flete, data.valor_seguro,
+                data.caso_estudio_id, user_id, data.es_compra_nacional || false,
+                data.tipo_mercancia_id, data.subpartida_hs10 || null, data.descripcion_mercancia,
+                data.moneda, data.valor_fob, data.valor_flete || 0, data.valor_seguro || 0,
                 data.habilitar_igv, data.habilitar_isc, data.habilitar_percepcion,
                 data.ad_valorem_tasa_manual, data.isc_tasa_ingresada, data.percepcion_tasa_ingresada,
-                data.antidumping_ingresado, data.compensatorio_ingresado, data.sda_ingresado,
+                data.antidumping_ingresado || 0, data.compensatorio_ingresado || 0, data.sda_ingresado || 0,
                 calculado.valor_cif, calculado.monto_ad_valorem, calculado.monto_isc,
                 calculado.monto_igv, calculado.monto_ipm, calculado.monto_percepcion,
                 calculado.dta_total, JSON.stringify(calculado.asiento_contable),
@@ -423,7 +494,8 @@ export class ImportacionService {
 
         const tipoMercancia = tipoRows[0];
 
-        if (data.subpartida_hs10 && !data.ad_valorem_tasa_manual) {
+        // Para importaciones: buscar tasa ad valorem si cambió subpartida
+        if (!datosCompletos.es_compra_nacional && data.subpartida_hs10 && !data.ad_valorem_tasa_manual) {
             const tasaAutomatica = await this.obtenerTasaAdValorem(data.subpartida_hs10);
             datosCompletos.ad_valorem_tasa_manual = tasaAutomatica ?? 0;
         }
@@ -433,16 +505,18 @@ export class ImportacionService {
         const { rows } = await dbQuery<ImportacionDB>(
             `UPDATE miaff.importaciones
              SET
-                 caso_estudio_id = $1, tipo_mercancia_id = $2, subpartida_hs10 = $3, descripcion_mercancia = $4, moneda = $5, valor_fob = $6,
-                 valor_flete = $7, valor_seguro = $8, habilitar_igv = $9, habilitar_isc = $10, habilitar_percepcion = $11,
-                 ad_valorem_tasa_manual = $12, isc_tasa_ingresada = $13, percepcion_tasa_ingresada = $14,
-                 antidumping_ingresado = $15, compensatorio_ingresado = $16, sda_ingresado = $17, valor_cif = $18,
-                 monto_ad_valorem = $19, monto_isc = $20, monto_igv = $21, monto_ipm = $22, monto_percepcion = $23,
-                 dta_total = $24, asiento_contable_json = $25, fecha_operacion = $26, updated_at = CURRENT_TIMESTAMP
-             WHERE id = $27 AND user_id = $28 AND activo = 1
+                 caso_estudio_id = $1, es_compra_nacional = $2, tipo_mercancia_id = $3,
+                 subpartida_hs10 = $4, descripcion_mercancia = $5, moneda = $6, valor_fob = $7,
+                 valor_flete = $8, valor_seguro = $9, habilitar_igv = $10, habilitar_isc = $11, habilitar_percepcion = $12,
+                 ad_valorem_tasa_manual = $13, isc_tasa_ingresada = $14, percepcion_tasa_ingresada = $15,
+                 antidumping_ingresado = $16, compensatorio_ingresado = $17, sda_ingresado = $18, valor_cif = $19,
+                 monto_ad_valorem = $20, monto_isc = $21, monto_igv = $22, monto_ipm = $23, monto_percepcion = $24,
+                 dta_total = $25, asiento_contable_json = $26, fecha_operacion = $27, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $28 AND user_id = $29 AND activo = 1
                  RETURNING *`,
             [
-                datosCompletos.caso_estudio_id, tipoMercanciaId, datosCompletos.subpartida_hs10, datosCompletos.descripcion_mercancia,
+                datosCompletos.caso_estudio_id, datosCompletos.es_compra_nacional || false, tipoMercanciaId,
+                datosCompletos.subpartida_hs10, datosCompletos.descripcion_mercancia,
                 datosCompletos.moneda, datosCompletos.valor_fob, datosCompletos.valor_flete, datosCompletos.valor_seguro,
                 datosCompletos.habilitar_igv, datosCompletos.habilitar_isc, datosCompletos.habilitar_percepcion,
                 datosCompletos.ad_valorem_tasa_manual, datosCompletos.isc_tasa_ingresada, datosCompletos.percepcion_tasa_ingresada,

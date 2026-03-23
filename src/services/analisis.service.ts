@@ -226,6 +226,7 @@ export class AnalisisService {
         const sql = `
             SELECT
                 i.id,
+                i.es_compra_nacional,
                 i.subpartida_hs10,
                 i.descripcion_mercancia,
                 i.tipo_mercancia_id,
@@ -440,9 +441,13 @@ export class AnalisisService {
             const totalVentasSinIgv = mercaderiasNacionales + mercaderiasInternacionales +
                 productosNacionales + productosInternacionales;
 
-            // 2. COSTO DE VENTAS
+            // 2. COSTO DE VENTAS (split importaciones vs compras nacionales)
             let mercaderias = 0;
+            let mercaderiasImportadas = 0;
+            let mercaderiasNacCosto = 0;
             let materiasPrimas = 0;
+            let materiasPrimasImportadas = 0;
+            let materiasPrimasNacionales = 0;
             let materialesAuxiliares = 0;
             let envasesEmbalajes = 0;
             let costosVinculados = 0;
@@ -450,17 +455,30 @@ export class AnalisisService {
             importaciones.forEach((imp) => {
                 const tc = (imp as any).tipo_cambio_fecha ?? tipoCambio;
                 const cifUSD = this.convertirAUSD(imp.valor_cif, imp.moneda, tc);
-                const adUSD = this.convertirAUSD(imp.antidumping_ingresado, imp.moneda, tc);
-                const cvdUSD = this.convertirAUSD(imp.compensatorio_ingresado, imp.moneda, tc);
-                const sdaUSD = this.convertirAUSD(imp.sda_ingresado, imp.moneda, tc);
+                const esNacional = (imp as any).es_compra_nacional || false;
 
                 switch (imp.tipo_mercancia_cuenta) {
-                    case '601': mercaderias += cifUSD; break;
-                    case '602': materiasPrimas += cifUSD; break;
+                    case '601':
+                        mercaderias += cifUSD;
+                        if (esNacional) mercaderiasNacCosto += cifUSD;
+                        else mercaderiasImportadas += cifUSD;
+                        break;
+                    case '602':
+                        materiasPrimas += cifUSD;
+                        if (esNacional) materiasPrimasNacionales += cifUSD;
+                        else materiasPrimasImportadas += cifUSD;
+                        break;
                     case '603': materialesAuxiliares += cifUSD; break;
                     case '604': envasesEmbalajes += cifUSD; break;
                 }
-                costosVinculados += (adUSD + cvdUSD + sdaUSD);
+
+                // Costos vinculados solo para importaciones reales
+                if (!esNacional) {
+                    const adUSD = this.convertirAUSD(imp.antidumping_ingresado, imp.moneda, tc);
+                    const cvdUSD = this.convertirAUSD(imp.compensatorio_ingresado, imp.moneda, tc);
+                    const sdaUSD = this.convertirAUSD(imp.sda_ingresado, imp.moneda, tc);
+                    costosVinculados += (adUSD + cvdUSD + sdaUSD);
+                }
             });
 
             const totalCostoVentas = mercaderias + materiasPrimas + materialesAuxiliares +
@@ -492,7 +510,11 @@ export class AnalisisService {
                 },
                 costo_ventas: {
                     mercaderias: this.redondear(mercaderias),
+                    mercaderias_importadas: this.redondear(mercaderiasImportadas),
+                    mercaderias_nacionales: this.redondear(mercaderiasNacCosto),
                     materias_primas: this.redondear(materiasPrimas),
+                    materias_primas_importadas: this.redondear(materiasPrimasImportadas),
+                    materias_primas_nacionales: this.redondear(materiasPrimasNacionales),
                     materiales_auxiliares: this.redondear(materialesAuxiliares),
                     envases_embalajes: this.redondear(envasesEmbalajes),
                     costos_vinculados: this.redondear(costosVinculados),

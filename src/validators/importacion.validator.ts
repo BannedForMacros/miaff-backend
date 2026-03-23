@@ -2,13 +2,14 @@ import { z } from 'zod';
 
 export const createImportacionSchema = z.object({
     caso_estudio_id: z.number({ required_error: 'El caso de estudio es obligatorio' }).int().positive(),
-    tipo_mercancia_id: z.number({ required_error: 'El tipo de mercancía es obligatorio' }).int().positive(), // NUEVO
-    subpartida_hs10: z.string({ required_error: 'La subpartida es obligatoria' }).length(10, 'La subpartida debe tener 10 dígitos'),
+    es_compra_nacional: z.boolean().default(false),
+    tipo_mercancia_id: z.number({ required_error: 'El tipo de mercancía es obligatorio' }).int().positive(),
+    subpartida_hs10: z.string().optional(),
     descripcion_mercancia: z.string({ required_error: 'La descripción es obligatoria' }).min(3, 'La descripción debe tener al menos 3 caracteres'),
     moneda: z.enum(['USD', 'PEN'], { required_error: 'La moneda debe ser USD o PEN' }),
-    valor_fob: z.number({ required_error: 'El valor FOB es obligatorio' }).nonnegative('El valor FOB no puede ser negativo'),
-    valor_flete: z.number({ required_error: 'El valor del flete es obligatorio' }).nonnegative('El flete no puede ser negativo'),
-    valor_seguro: z.number({ required_error: 'El valor del seguro es obligatorio' }).nonnegative('El seguro no puede ser negativo'),
+    valor_fob: z.number({ required_error: 'El monto es obligatorio' }).nonnegative('El monto no puede ser negativo'),
+    valor_flete: z.number().nonnegative().default(0),
+    valor_seguro: z.number().nonnegative().default(0),
     habilitar_igv: z.boolean().default(true),
     habilitar_isc: z.boolean().default(false),
     habilitar_percepcion: z.boolean().default(true),
@@ -19,17 +20,29 @@ export const createImportacionSchema = z.object({
     compensatorio_ingresado: z.number().nonnegative().default(0),
     sda_ingresado: z.number().nonnegative().default(0),
     fecha_operacion: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+}).superRefine((data, ctx) => {
+    // Subpartida es obligatoria solo para importaciones (no compras nacionales)
+    if (!data.es_compra_nacional) {
+        if (!data.subpartida_hs10 || data.subpartida_hs10.length !== 10) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: 'La subpartida es obligatoria para importaciones (10 dígitos)',
+                path: ['subpartida_hs10'],
+            });
+        }
+    }
 });
 
 export const updateImportacionSchema = z.object({
     caso_estudio_id: z.number().int().positive().optional(),
-    tipo_mercancia_id: z.number().int().positive().optional(), // NUEVO
+    es_compra_nacional: z.boolean().optional(),
+    tipo_mercancia_id: z.number().int().positive().optional(),
     subpartida_hs10: z.string().length(10, 'La subpartida debe tener 10 dígitos').optional(),
     descripcion_mercancia: z.string().min(3, 'La descripción debe tener al menos 3 caracteres').optional(),
     moneda: z.enum(['USD', 'PEN']).optional(),
-    valor_fob: z.number().nonnegative('El valor FOB no puede ser negativo').optional(),
-    valor_flete: z.number().nonnegative('El flete no puede ser negativo').optional(),
-    valor_seguro: z.number().nonnegative('El seguro no puede ser negativo').optional(),
+    valor_fob: z.number().nonnegative('El monto no puede ser negativo').optional(),
+    valor_flete: z.number().nonnegative().optional(),
+    valor_seguro: z.number().nonnegative().optional(),
     habilitar_igv: z.boolean().optional(),
     habilitar_isc: z.boolean().optional(),
     habilitar_percepcion: z.boolean().optional(),
