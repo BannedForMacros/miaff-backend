@@ -110,6 +110,9 @@ export class AnalisisService {
             const exportaciones = await this.obtenerExportaciones(casoId);
             const gastos = await this.obtenerGastosPorClasificacion(casoId);
 
+            // Obtener datos financieros guardados (activos_totales, patrimonio)
+            const datosFinancieros = await GastoService.obtenerDatosFinancieros(userId, casoId);
+
             console.log(`\n📊 Datos obtenidos:`);
             console.log(`   Importaciones: ${importaciones.length}`);
             console.log(`   Exportaciones: ${exportaciones.length}`);

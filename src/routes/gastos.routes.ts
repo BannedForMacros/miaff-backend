@@ -725,4 +725,9 @@ router.get('/:id/asiento-contable', GastoController.generarAsientoContablePorGas
  */
 router.get('/resumen-por-tipo', GastoController.obtenerResumenPorTipo);
 
+// ==================== DATOS FINANCIEROS (ROA / ROE) ====================
+
+router.post('/datos-financieros', GastoController.guardarDatosFinancieros);
+router.get('/datos-financieros/:caso_id', GastoController.obtenerDatosFinancieros);
+
 export default router;
