@@ -162,13 +162,30 @@ export class AnalisisService {
                 )
             };
 
+            // Calcular ROA y ROE si hay datos financieros guardados
+            let roa: number | null = null;
+            let roe: number | null = null;
+
+            if (datosFinancieros) {
+                const activos = parseFloat(String(datosFinancieros.activos_totales)) || 0;
+                const patrimonio = parseFloat(String(datosFinancieros.patrimonio)) || 0;
+
+                if (activos > 0) {
+                    roa = this.calcularPorcentaje(estadoResultados.utilidad_neta, activos);
+                }
+                if (patrimonio > 0) {
+                    roe = this.calcularPorcentaje(estadoResultados.utilidad_neta, patrimonio);
+                }
+                console.log(`📊 Datos financieros: Activos=${activos}, Patrimonio=${patrimonio}, ROA=${roa}, ROE=${roe}`);
+            }
+
             const ratiosFinancieros: RatiosFinancieros = {
                 margen_bruto: utilidadBruta.margen_bruto_porcentaje,
                 margen_operativo: utilidadOperativa.margen_operativo_porcentaje,
                 margen_neto: utilidadNeta.margen_neto_porcentaje,
                 ros: utilidadNeta.margen_neto_porcentaje,
-                roa: null,
-                roe: null
+                roa,
+                roe
             };
 
             const resumenMonedas = this.calcularResumenMonedas(

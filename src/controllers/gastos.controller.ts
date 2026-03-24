@@ -291,11 +291,11 @@ export class GastoController {
 
   static async obtenerDatosFinancieros(req: Request, res: Response) {
     const user = (req as any).user as JwtUser;
-    const casoEstudioId = parseInt(req.query.caso_estudio_id as string, 10);
-    
+    const casoEstudioId = parseInt(req.params.caso_id as string, 10);
+
     if (isNaN(casoEstudioId)) {
-      return res.status(400).json({ 
-        message: 'El ID del caso de estudio es requerido.' 
+      return res.status(400).json({
+        message: 'El ID del caso de estudio es requerido.'
       });
     }
     
