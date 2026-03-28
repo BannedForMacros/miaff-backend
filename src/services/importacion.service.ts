@@ -292,8 +292,8 @@ export class ImportacionService {
         const reglas = await this._obtenerReglasContables();
 
         const monto = round2(data.valor_fob); // valor_fob = monto de compra para nacional
-        const montoIGV = round2(monto * tasasImpuestos.igv);
-        const montoIPM = round2(monto * tasasImpuestos.ipm);
+        const montoIGV = data.habilitar_igv ? round2(monto * tasasImpuestos.igv) : 0;
+        const montoIPM = data.habilitar_igv ? round2(monto * tasasImpuestos.ipm) : 0;
 
         const tributos: TributoDB[] = [];
         if (montoIGV > 0) tributos.push({ concepto: 'igv', base_imponible: monto, tasa_aplicada: tasasImpuestos.igv, monto_calculado: montoIGV });
