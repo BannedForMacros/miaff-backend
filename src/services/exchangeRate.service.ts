@@ -99,8 +99,33 @@ export class ExchangeRateService {
             return info;
         } catch (error) {
             console.error(`❌ Error obteniendo T/C desde Decolecta para ${targetDate}:`, error);
-            throw new Error(`No se pudo obtener el tipo de cambio para ${targetDate}`);
         }
+
+        // 4. Fallback: último T/C disponible en BD (útil en fines de semana o si Decolecta falla)
+        try {
+            const { rows } = await dbQuery<DBExchangeRateRow>(
+                `SELECT buy_price, sell_price, date::text as date
+                 FROM miaff.exchange_rates
+                 WHERE currency = 'USD' AND date <= $1
+                 ORDER BY date DESC
+                 LIMIT 1`,
+                [targetDate]
+            );
+            if (rows.length > 0) {
+                const info: ExchangeRateInfo = {
+                    rate:     parseFloat(rows[0].sell_price),
+                    buyPrice: parseFloat(rows[0].buy_price),
+                    date:     rows[0].date,
+                };
+                memoryCache.set(targetDate, { ...info, timestamp: Date.now() });
+                console.warn(`⚠️ T/C de ${targetDate} no disponible en Decolecta. Usando último disponible: ${rows[0].date}`);
+                return info;
+            }
+        } catch (fallbackError) {
+            console.error('Error en fallback DB para T/C:', fallbackError);
+        }
+
+        throw new Error(`No se pudo obtener el tipo de cambio para ${targetDate}`);
     }
 
     private static async fetchFromDecolecta(date?: string): Promise<ExchangeRateInfo> {
