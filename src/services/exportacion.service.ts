@@ -87,10 +87,12 @@ export class ExportacionService {
             haber: 0
         });
 
-        // 3. HABER: Cuenta de venta (7011, 7012, 7021, 7022)
+        // 3. HABER: Cuenta de venta — 7011 nacional, 7012 internacional
         detalles.push({
-            codigo_cuenta: exportacion.cuenta_venta,
-            denominacion: exportacion.tipo_producto_nombre,
+            codigo_cuenta: exportacion.es_venta_nacional ? '7011' : '7012',
+            denominacion: exportacion.es_venta_nacional
+                ? 'Mercaderías — Ventas nacionales'
+                : 'Mercaderías — Exportaciones',
             debe: 0,
             haber: montoBase
         });
