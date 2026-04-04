@@ -620,11 +620,19 @@ export class AnalisisService {
                 const tc = (gasto as any).tipo_cambio_fecha ?? tipoCambio;
                 const montoUSD = this.convertirAUSD(gasto.monto_base, gasto.moneda, tc);
                 const cuenta = (gasto.cuenta_contable_codigo || '').trim();
-
-                // Buscar categoría por prefijo de 3 dígitos de la cuenta contable
                 const prefijo = cuenta.substring(0, 3);
+
+                // 627.x se auto-calcula desde 621.x (igual que el asiento contable).
+                // Si el usuario también registró un 627.x manual, se ignora para no duplicar.
+                if (prefijo === '627') return;
+
                 const categoria = mapCuenta[prefijo] || 'otros_gastos';
                 acc[categoria] += montoUSD;
+
+                // Auto-incluir ESSALUD (9%) por cada remuneración, igual que el asiento
+                if (prefijo === '621') {
+                    acc.seguridad_social += montoUSD * 0.09;
+                }
             } catch (error) {
                 console.warn(`⚠️ Error procesando gasto ${gasto.id}:`, error);
             }
