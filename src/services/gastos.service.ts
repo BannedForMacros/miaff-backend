@@ -98,6 +98,10 @@ export class GastoService {
 
         // Calcular monto_base y monto_igv
         const calculado = this.calcularMontos(monto, incluyeIgvFinal === true);
+        // Para remuneraciones: monto total = sueldo + ESSALUD 9% (costo real del empleador)
+        if (es_remuneracion) {
+            calculado.total = Math.round(calculado.base * 1.09 * 100) / 100;
+        }
 
         // Obtener TC de la fecha del gasto
         const fechaG = fecha_gasto || new Date().toISOString().split('T')[0];
@@ -185,7 +189,10 @@ export class GastoService {
             const calculado = this.calcularMontos(data.monto, incluyeIgvFinal === true);
             montoBase = calculado.base;
             montoIgv = calculado.igv;
-            montoTotal = calculado.total;
+            // Para remuneraciones: monto total = sueldo + ESSALUD 9%
+            montoTotal = mergedGasto.es_remuneracion
+                ? Math.round(montoBase * 1.09 * 100) / 100
+                : calculado.total;
         }
 
         const updateSql = `
