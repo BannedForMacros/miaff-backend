@@ -326,7 +326,8 @@ export class ExportacionService {
       SELECT e.*, tp.nombre as tipo_producto_nombre, tp.cuenta_contable
       FROM miaff.exportaciones e
       LEFT JOIN miaff.tipo_producto_venta tp ON e.tipo_producto_id = tp.id
-      WHERE e.user_id = $1 AND e.activo = true
+      JOIN miaff.casos_de_estudio ce ON ce.id = e.caso_estudio_id
+      WHERE e.user_id = $1 AND e.activo = true AND ce.estado != 'eliminado'
     `;
         const params: any[] = [userId];
 

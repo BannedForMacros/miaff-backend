@@ -246,10 +246,13 @@ export class GastoService {
                 miaff.gastos g
                     JOIN
                 miaff.clasificacion_gastos cg ON g.clasificacion_id = cg.id
+                    JOIN
+                miaff.casos_de_estudio ce ON ce.id = g.caso_estudio_id
             WHERE
                 g.user_id = $1
               AND g.caso_estudio_id = $2
               AND g.activo = 1
+              AND ce.estado != 'eliminado'
             ORDER BY
                 cg.tipo_gasto, g.fecha_gasto DESC, g.created_at DESC;
         `;
